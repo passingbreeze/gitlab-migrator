@@ -6,13 +6,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/config"
-	"github.com/go-git/go-git/v5/storage/memory"
-	"github.com/google/go-github/v66/github"
-	"github.com/hashicorp/go-hclog"
-	"github.com/hashicorp/go-retryablehttp"
-	"github.com/xanzy/go-gitlab"
 	"net/http"
 	"net/url"
 	"os"
@@ -20,6 +13,14 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/config"
+	"github.com/go-git/go-git/v5/storage/memory"
+	"github.com/google/go-github/v66/github"
+	"github.com/hashicorp/go-hclog"
+	"github.com/hashicorp/go-retryablehttp"
+	"github.com/xanzy/go-gitlab"
 )
 
 const (
@@ -312,19 +313,19 @@ func performMigration(ctx context.Context, projects Projects) error {
 			return err
 		}
 
-		for _, mr := range mergeRequests {
-			if mr == nil {
+		for _, mergeRequest := range mergeRequests {
+			if mergeRequest == nil {
 				continue
 			}
 
-			if !strings.EqualFold(mr.State, "opened") {
+			if !strings.EqualFold(mergeRequest.State, "opened") {
 				logger.Trace("TODO: check for branch of closed/merged MR and recreate it temporarily as needed")
 			}
 
-			var existingPullRequest *github.PullRequest
+			var pullRequest *github.PullRequest
 
-			logger.Debug("searching for any existing pull request", "repo", project[1], "source", mr.SourceBranch, "target", mr.TargetBranch)
-			query := fmt.Sprintf("repo:%s/%s is:pr head:%s", githubPath[0], githubPath[1], mr.SourceBranch)
+			logger.Debug("searching for any existing pull request", "repo", project[1], "source", mergeRequest.SourceBranch, "target", mergeRequest.TargetBranch)
+			query := fmt.Sprintf("repo:%s/%s is:pr head:%s", githubPath[0], githubPath[1], mergeRequest.SourceBranch)
 			searchResult, _, err := gh.Search.Issues(ctx, query, nil)
 			if err != nil {
 				return err
@@ -349,17 +350,17 @@ func performMigration(ctx context.Context, projects Projects) error {
 							return err
 						}
 
-						if pr.Head != nil && pr.Head.Ref != nil && *pr.Head.Ref == mr.SourceBranch && pr.Base != nil && pr.Base.Ref != nil && *pr.Base.Ref == mr.TargetBranch {
-							logger.Debug("found existing pull request", "repo", project[1], "source", mr.SourceBranch, "target", mr.TargetBranch)
-							existingPullRequest = pr
+						if pr.Head != nil && pr.Head.Ref != nil && *pr.Head.Ref == mergeRequest.SourceBranch && pr.Base != nil && pr.Base.Ref != nil && *pr.Base.Ref == mergeRequest.TargetBranch {
+							logger.Debug("found existing pull request", "repo", project[1], "source", mergeRequest.SourceBranch, "target", mergeRequest.TargetBranch)
+							pullRequest = pr
 						}
 					}
 				}
 			}
 
-			githubAuthorName := mr.Author.Name
+			githubAuthorName := mergeRequest.Author.Name
 
-			author, _, err := gl.Users.GetUser(mr.Author.ID, gitlab.GetUsersOptions{})
+			author, _, err := gl.Users.GetUser(mergeRequest.Author.ID, gitlab.GetUsersOptions{})
 			if err != nil {
 				return err
 			}
@@ -368,55 +369,59 @@ func performMigration(ctx context.Context, projects Projects) error {
 			}
 
 			originalState := ""
-			if !strings.EqualFold(mr.State, "opened") {
-				originalState = fmt.Sprintf("> This merge request was originally **%s** on GitLab", mr.State)
+			if !strings.EqualFold(mergeRequest.State, "opened") {
+				originalState = fmt.Sprintf("> This merge request was originally **%s** on GitLab", mergeRequest.State)
 			}
+
+			// TODO: work out the original approvers
 
 			body := fmt.Sprintf(`> [!NOTE]
 > This pull request was migrated from GitLab
 >
-> Original Author: %[1]s
-> GitLab Project: %[4]s/%[5]s
-> GitLab MR Number: %[2]d
-> Date Originally Opened: %[6]s
+> |      |      |
+> | ---- | ---- |
+> | **Original Author** | %[1]s |
+> | **GitLab Project** | %[4]s/%[5]s |
+> | **GitLab MR Number** | %[2]d |
+> | **Date Originally Opened** | %[6]s |
+> |      |      |
 >
 %[7]s
 
 ## Original Description
 
-%[3]s`, githubAuthorName, mr.IID, mr.Description, gitlabPath[0], gitlabPath[1], mr.CreatedAt.Format("Mon, 2 Jan 2006"), originalState)
+%[3]s`, githubAuthorName, mergeRequest.IID, mergeRequest.Description, gitlabPath[0], gitlabPath[1], mergeRequest.CreatedAt.Format("Mon, 2 Jan 2006"), originalState)
 
-			if existingPullRequest == nil {
-				logger.Debug("creating pull request", "repo", project[1], "source", mr.SourceBranch, "target", mr.TargetBranch)
-				pullRequest := github.NewPullRequest{
-					Title:               &mr.Title,
-					Head:                &mr.SourceBranch,
-					Base:                &mr.TargetBranch,
+			if pullRequest == nil {
+				logger.Debug("creating pull request", "repo", project[1], "source", mergeRequest.SourceBranch, "target", mergeRequest.TargetBranch)
+				newPullRequest := github.NewPullRequest{
+					Title:               &mergeRequest.Title,
+					Head:                &mergeRequest.SourceBranch,
+					Base:                &mergeRequest.TargetBranch,
 					Body:                &body,
 					MaintainerCanModify: pointer(true),
-					Draft:               &mr.Draft,
+					Draft:               &mergeRequest.Draft,
 				}
-				_, _, err = gh.PullRequests.Create(ctx, githubPath[0], githubPath[1], &pullRequest)
-				if err != nil {
+				if pullRequest, _, err = gh.PullRequests.Create(ctx, githubPath[0], githubPath[1], &newPullRequest); err != nil {
 					return err
 				}
 
 			} else {
-				logger.Debug("updating pull request", "repo", project[1], "source", mr.SourceBranch, "target", mr.TargetBranch)
+				logger.Debug("updating pull request", "repo", project[1], "source", mergeRequest.SourceBranch, "target", mergeRequest.TargetBranch)
 
 				var newState *string
-				switch mr.State {
+				switch mergeRequest.State {
 				case "opened":
 					newState = pointer("open")
 				case "closed", "merged":
 					newState = pointer("closed")
 				}
 
-				existingPullRequest.Title = &mr.Title
-				existingPullRequest.Body = &body
-				existingPullRequest.Draft = &mr.Draft
-				existingPullRequest.State = newState
-				if _, _, err = gh.PullRequests.Edit(ctx, githubPath[0], githubPath[1], existingPullRequest.GetNumber(), existingPullRequest); err != nil {
+				pullRequest.Title = &mergeRequest.Title
+				pullRequest.Body = &body
+				pullRequest.Draft = &mergeRequest.Draft
+				pullRequest.State = newState
+				if pullRequest, _, err = gh.PullRequests.Edit(ctx, githubPath[0], githubPath[1], pullRequest.GetNumber(), pullRequest); err != nil {
 					return err
 				}
 			}
