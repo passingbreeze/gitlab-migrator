@@ -36,7 +36,8 @@ var logger hclog.Logger
 var gh *github.Client
 var gl *gitlab.Client
 
-var usersCache map[string]*github.User
+var gitlabUsersCache map[string]*gitlab.User
+var githubUsersCache map[string]*github.User
 
 type Projects = [][]string
 
@@ -64,7 +65,8 @@ func main() {
 		Level: hclog.LevelFromString(os.Getenv("LOG_LEVEL")),
 	})
 
-	usersCache = make(map[string]*github.User)
+	gitlabUsersCache = make(map[string]*gitlab.User)
+	githubUsersCache = make(map[string]*github.User)
 
 	githubToken = os.Getenv("GITHUB_TOKEN")
 	if githubToken == "" {
@@ -191,20 +193,9 @@ func performMigration(ctx context.Context, projects Projects) error {
 
 		logger.Info("mirroring repository from GitLab to GitHub", "name", gitlabPath[1], "group", gitlabPath[0])
 
-		var user *github.User
-		var ok bool
-		if user, ok = usersCache[githubPath[0]]; !ok {
-			logger.Debug("retrieving user details", "name", githubPath[0])
-			if user, _, err = gh.Users.Get(ctx, githubPath[0]); err != nil {
-				return err
-			}
-		}
-
-		if user == nil {
-			return fmt.Errorf("nil user was returned: %s", githubPath[0])
-		}
-		if user.Type == nil {
-			return fmt.Errorf("unable to determine whether owner is a user or organisatition: %s", githubPath[0])
+		user, err := getGithubUser(ctx, githubPath[0])
+		if err != nil {
+			return err
 		}
 
 		var org string
@@ -360,7 +351,7 @@ func performMigration(ctx context.Context, projects Projects) error {
 
 			githubAuthorName := mergeRequest.Author.Name
 
-			author, _, err := gl.Users.GetUser(mergeRequest.Author.ID, gitlab.GetUsersOptions{})
+			author, err := getGitlabUser(mergeRequest.Author.Username)
 			if err != nil {
 				return err
 			}
@@ -425,20 +416,125 @@ func performMigration(ctx context.Context, projects Projects) error {
 					return err
 				}
 			}
-		}
 
-		//pullRequests, _, err := gh.PullRequests.List(ctx, githubPath[0], githubPath[1], nil)
-		//if err != nil {
-		//	return err
-		//}
-		//
-		//for _, pr := range pullRequests {
-		//	if pr == nil {
-		//		continue
-		//	}
-		//	fmt.Printf("%#v", *pr)
-		//}
+			logger.Debug("retrieving GitLab merge request comments", "name", gitlabPath[1], "group", gitlabPath[0], "project_id", match.ID, "merge_request_id", mergeRequest.IID)
+			comments, _, err := gl.Notes.ListMergeRequestNotes(match.ID, mergeRequest.IID, &gitlab.ListMergeRequestNotesOptions{OrderBy: pointer("created_at"), Sort: pointer("asc")})
+			if err != nil {
+				return err
+			}
+
+			logger.Debug("retrieving GitHub pull request comments", "repo", project[1], "pull_request_id", pullRequest.GetNumber())
+			prComments, _, err := gh.Issues.ListComments(ctx, githubPath[0], githubPath[1], pullRequest.GetNumber(), &github.IssueListCommentsOptions{Sort: pointer("created"), Direction: pointer("asc")})
+			if err != nil {
+				return err
+			}
+
+			for _, comment := range comments {
+				if comment == nil || comment.System {
+					continue
+				}
+
+				githubCommentAuthorName := comment.Author.Name
+
+				commentAuthor, err := getGitlabUser(comment.Author.Username)
+				if err != nil {
+					return err
+				}
+				if commentAuthor.WebsiteURL != "" {
+					githubCommentAuthorName = "@" + strings.TrimPrefix(strings.ToLower(commentAuthor.WebsiteURL), "https://github.com/")
+				}
+
+				commentBody := fmt.Sprintf(`> [!NOTE]
+> This comment was migrated from GitLab
+>
+> |      |      |
+> | ---- | ---- |
+> | **Original Author** | %[1]s |
+> | **Note ID** | %[2]d |
+> | **Date Originally Created** | %[3]s |
+> |      |      |
+>
+
+## Original Comment
+
+%[4]s`, githubCommentAuthorName, comment.ID, comment.CreatedAt.Format("Mon, 2 Jan 2006"), comment.Body)
+
+				updated := false
+				for _, prComment := range prComments {
+					if prComment == nil {
+						continue
+					}
+
+					if strings.Contains(prComment.GetBody(), fmt.Sprintf("**Note ID** | %d", comment.ID)) {
+						logger.Debug("updating pull request comment", "repo", project[1], "source", mergeRequest.SourceBranch, "target", mergeRequest.TargetBranch, "pr_number", pullRequest.GetNumber())
+						prComment.Body = &commentBody
+						if _, _, err = gh.Issues.EditComment(ctx, githubPath[0], githubPath[1], prComment.GetID(), prComment); err != nil {
+							return err
+						}
+						updated = true
+					}
+				}
+
+				if !updated {
+					logger.Debug("creating pull request comment", "repo", project[1], "source", mergeRequest.SourceBranch, "target", mergeRequest.TargetBranch, "pr_number", pullRequest.GetNumber())
+					newComment := github.IssueComment{
+						Body: &commentBody,
+					}
+					if _, _, err = gh.Issues.CreateComment(ctx, githubPath[0], githubPath[1], pullRequest.GetNumber(), &newComment); err != nil {
+						return err
+					}
+				}
+			}
+		}
 	}
 
 	return nil
+}
+
+func getGithubUser(ctx context.Context, username string) (*github.User, error) {
+	var user *github.User
+	var err error
+	var ok bool
+	if user, ok = githubUsersCache[username]; !ok {
+		logger.Debug("retrieving user details", "username", username)
+		if user, _, err = gh.Users.Get(ctx, username); err != nil {
+			return nil, err
+		}
+
+		logger.Trace("caching GitHub user", "username", username)
+		githubUsersCache[username] = user
+	}
+
+	if user == nil {
+		return nil, fmt.Errorf("nil user was returned: %s", username)
+	}
+	if user.Type == nil {
+		return nil, fmt.Errorf("unable to determine whether owner is a user or organisatition: %s", username)
+	}
+
+	return user, nil
+}
+
+func getGitlabUser(username string) (*gitlab.User, error) {
+	user, ok := gitlabUsersCache[username]
+	if !ok {
+		logger.Debug("retrieving user details", "username", username)
+		users, _, err := gl.Users.ListUsers(&gitlab.ListUsersOptions{Username: &username})
+		if err != nil {
+			return nil, err
+		}
+
+		for _, user = range users {
+			if user != nil && user.Username == username {
+				logger.Trace("caching GitLab user", "username", username)
+				gitlabUsersCache[username] = user
+
+				return user, nil
+			}
+		}
+
+		return nil, fmt.Errorf("GitLab user not found: %s", username)
+	}
+
+	return user, nil
 }
