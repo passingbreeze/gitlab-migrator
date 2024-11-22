@@ -29,7 +29,7 @@ const (
 	defaultGitlabDomain = "gitlab.com"
 )
 
-var deleteExistingRepos bool
+var deleteExistingRepos, renameMasterToMain bool
 var githubDomain, githubRepo, githubToken, githubUser, gitlabDomain, gitlabProject, gitlabToken, projectsCsvPath string
 
 var client *http.Client
@@ -82,6 +82,8 @@ func main() {
 	}
 
 	flag.BoolVar(&deleteExistingRepos, "delete-existing-repos", false, "whether existing repositories should be deleted before migrating (defaults to: false)")
+	flag.BoolVar(&renameMasterToMain, "rename-master-to-main", false, "rename master branch to main and update pull requests (defaults to: false)")
+
 	flag.StringVar(&githubDomain, "github-domain", defaultGithubDomain, "specifies the GitHub domain to use (defaults to: github.com)")
 	flag.StringVar(&githubRepo, "github-repo", "", "the GitHub repository to migrate to")
 	flag.StringVar(&githubUser, "github-user", "", "specifies the GitHub user to use, who will author any migrated PRs (required)")
@@ -273,6 +275,23 @@ func performMigration(ctx context.Context, projects Projects) error {
 			return err
 		}
 
+		if renameMasterToMain {
+			if masterBranch, err := repo.Reference(plumbing.NewBranchReferenceName("master"), false); err == nil {
+				logger.Info("renaming master branch to main prior to push", "repo", project[1], "sha", masterBranch.Hash())
+
+				logger.Debug("creating main branch", "repo", project[1], "sha", masterBranch.Hash())
+				mainBranch := plumbing.NewHashReference(plumbing.NewBranchReferenceName("main"), masterBranch.Hash())
+				if err = repo.Storer.SetReference(mainBranch); err != nil {
+					return err
+				}
+
+				logger.Debug("deleting master branch", "repo", project[1], "sha", masterBranch.Hash())
+				if err = repo.Storer.RemoveReference(masterBranch.Name()); err != nil {
+					return err
+				}
+			}
+		}
+
 		githubUrl := fmt.Sprintf("https://%s/%s/%s", githubDomain, githubPath[0], githubPath[1])
 		githubUrlWithCredentials := fmt.Sprintf("https://%s:%s@%s/%s/%s", githubUser, githubToken, githubDomain, githubPath[0], githubPath[1])
 
@@ -305,10 +324,15 @@ func performMigration(ctx context.Context, projects Projects) error {
 			return err
 		}
 
-		// Iterate GitLab merge requests
+		logger.Info("migrating merge requests from GitLab to GitHub", "name", gitlabPath[1], "group", gitlabPath[0])
 		for _, mergeRequest := range mergeRequests {
 			if mergeRequest == nil {
 				continue
+			}
+
+			if renameMasterToMain && mergeRequest.TargetBranch == "master" {
+				logger.Trace("changing target branch from master to main", "name", gitlabPath[1], "group", gitlabPath[0], "project_id", match.ID, "merge_request_id", mergeRequest.IID)
+				mergeRequest.TargetBranch = "main"
 			}
 
 			if !strings.EqualFold(mergeRequest.State, "opened") {
@@ -329,9 +353,19 @@ func performMigration(ctx context.Context, projects Projects) error {
 						RefSpecs:   []config.RefSpec{config.RefSpec(fmt.Sprintf("refs/heads/%[1]s:refs/heads/%[1]s", mergeRequest.SourceBranch))},
 						Force:      true,
 					}); err != nil {
-						return err
+						uptodateError := errors.New("already up-to-date")
+						if errors.As(err, &uptodateError) {
+							logger.Debug("branch already exists and is up-to-date on GitHub", "repo", project[1], "source_branch", branchName)
+						} else {
+							return err
+						}
 					}
 				}
+			}
+
+			// TODO: temporarily skipping unopened PRs because we need a diff before we can recreate them
+			if !strings.EqualFold(mergeRequest.State, "opened") {
+				continue
 			}
 
 			var pullRequest *github.PullRequest
@@ -388,6 +422,11 @@ func performMigration(ctx context.Context, projects Projects) error {
 
 			// TODO: work out the original approvers
 
+			description := mergeRequest.Description
+			if strings.TrimSpace(description) == "" {
+				description = "_No description_"
+			}
+
 			body := fmt.Sprintf(`> [!NOTE]
 > This pull request was migrated from GitLab
 >
@@ -403,7 +442,7 @@ func performMigration(ctx context.Context, projects Projects) error {
 
 ## Original Description
 
-%[3]s`, githubAuthorName, mergeRequest.IID, mergeRequest.Description, gitlabPath[0], gitlabPath[1], mergeRequest.CreatedAt.Format("Mon, 2 Jan 2006"), originalState)
+%[3]s`, githubAuthorName, mergeRequest.IID, description, gitlabPath[0], gitlabPath[1], mergeRequest.CreatedAt.Format("Mon, 2 Jan 2006"), originalState)
 
 			if pullRequest == nil {
 				logger.Debug("creating pull request", "repo", project[1], "source", mergeRequest.SourceBranch, "target", mergeRequest.TargetBranch)
