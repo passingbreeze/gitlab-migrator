@@ -6,12 +6,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"net/http"
-	"net/url"
-	"os"
-	"os/signal"
-	"strings"
-
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/storage/memory"
@@ -19,6 +13,13 @@ import (
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/go-retryablehttp"
 	"github.com/xanzy/go-gitlab"
+	"net/http"
+	"net/url"
+	"os"
+	"os/signal"
+	"regexp"
+	"strconv"
+	"strings"
 )
 
 const (
@@ -27,7 +28,7 @@ const (
 )
 
 var deleteExistingRepos bool
-var githubDomain, githubUser, githubToken, gitlabDomain, gitlabToken, projectsCsvPath string
+var githubDomain, githubRepo, githubToken, githubUser, gitlabDomain, gitlabProject, gitlabToken, projectsCsvPath string
 
 var client *http.Client
 var logger hclog.Logger
@@ -78,9 +79,11 @@ func main() {
 
 	flag.BoolVar(&deleteExistingRepos, "delete-existing-repos", false, "whether existing repositories should be deleted before migrating (defaults to: false)")
 	flag.StringVar(&githubDomain, "github-domain", defaultGithubDomain, "specifies the GitHub domain to use (defaults to: github.com)")
-	flag.StringVar(&githubUser, "github-user", "", "specifies the GitHub user to use (required)")
+	flag.StringVar(&githubRepo, "github-repo", "", "the GitHub repository to migrate to")
+	flag.StringVar(&githubUser, "github-user", "", "specifies the GitHub user to use, who will author any migrated PRs (required)")
 	flag.StringVar(&gitlabDomain, "gitlab-domain", defaultGitlabDomain, "specifies the GitLab domain to use (defaults to: gitlab.com)")
-	flag.StringVar(&projectsCsvPath, "projects-csv", "projects.csv", "specifies the path to a CSV file describing projects to migrate (defaults to: projects.csv)")
+	flag.StringVar(&gitlabProject, "gitlab-project", "", "the GitLab project to migrate")
+	flag.StringVar(&projectsCsvPath, "projects-csv", "", "specifies the path to a CSV file describing projects to migrate (incompatible with -gitlab-project and -github-project)")
 	flag.Parse()
 
 	if githubUser == "" {
@@ -88,7 +91,18 @@ func main() {
 		os.Exit(1)
 	}
 
+	repoSpecifiedInline := githubRepo != "" && gitlabProject != ""
+	if repoSpecifiedInline && projectsCsvPath != "" {
+		logger.Error("cannot specify -projects-csv and either -github-repo or -gitlab-project at the same time")
+		os.Exit(1)
+	}
+	if !repoSpecifiedInline && projectsCsvPath == "" {
+		logger.Error("must specify either -projects-csv or both of -github-repo and -gitlab-project")
+		os.Exit(1)
+	}
+
 	retryClient := retryablehttp.NewClient()
+	retryClient.Logger = nil
 	retryClient.RetryMax = 5
 
 	client = retryClient.StandardClient()
@@ -113,16 +127,20 @@ func main() {
 		os.Exit(1)
 	}
 
-	csvFile, err := os.Open(projectsCsvPath)
-	if err != nil {
-		logger.Error(err.Error())
-		os.Exit(1)
-	}
+	projects := make([][]string, 0)
+	if projectsCsvPath != "" {
+		csvFile, err := os.Open(projectsCsvPath)
+		if err != nil {
+			logger.Error(err.Error())
+			os.Exit(1)
+		}
 
-	projects, err := csv.NewReader(csvFile).ReadAll()
-	if err != nil {
-		logger.Error(err.Error())
-		os.Exit(1)
+		if projects, err = csv.NewReader(csvFile).ReadAll(); err != nil {
+			logger.Error(err.Error())
+			os.Exit(1)
+		}
+	} else {
+		projects = [][]string{{gitlabProject, githubRepo}}
 	}
 
 	if err = performMigration(ctx, projects); err != nil {
@@ -136,6 +154,8 @@ func pointer[T any](v T) *T {
 }
 
 func performMigration(ctx context.Context, projects Projects) error {
+	logger.Info(fmt.Sprintf("processing %d project(s)", len(projects)))
+
 	for _, project := range projects {
 		gitlabPath := strings.Split(project[0], "/")
 		githubPath := strings.Split(project[1], "/")
@@ -286,19 +306,121 @@ func performMigration(ctx context.Context, projects Projects) error {
 			}
 		}
 
-		//logger.Debug("retrieving GitLab merge requests", "name", gitlabPath[1], "group", gitlabPath[0], "project_id", match.ID)
-		//mergeRequests, _, err := gl.MergeRequests.ListProjectMergeRequests(match.ID, nil)
-		//if err != nil {
-		//	return err
-		//}
-		//
-		//for _, mr := range mergeRequests {
-		//	if mr == nil {
-		//		continue
-		//	}
-		//
-		//	fmt.Printf("%#v", *mr)
-		//}
+		logger.Debug("retrieving GitLab merge requests", "name", gitlabPath[1], "group", gitlabPath[0], "project_id", match.ID)
+		mergeRequests, _, err := gl.MergeRequests.ListProjectMergeRequests(match.ID, nil)
+		if err != nil {
+			return err
+		}
+
+		for _, mr := range mergeRequests {
+			if mr == nil {
+				continue
+			}
+
+			if !strings.EqualFold(mr.State, "opened") {
+				logger.Trace("TODO: check for branch of closed/merged MR and recreate it temporarily as needed")
+			}
+
+			var existingPullRequest *github.PullRequest
+
+			logger.Debug("searching for any existing pull request", "repo", project[1], "source", mr.SourceBranch, "target", mr.TargetBranch)
+			query := fmt.Sprintf("repo:%s/%s is:pr head:%s", githubPath[0], githubPath[1], mr.SourceBranch)
+			searchResult, _, err := gh.Search.Issues(ctx, query, nil)
+			if err != nil {
+				return err
+			}
+
+			for _, issue := range searchResult.Issues {
+				if issue == nil {
+					continue
+				}
+
+				if issue.IsPullRequest() {
+					// Extract the PR number from the URL
+					prUrl, err := url.Parse(*issue.PullRequestLinks.URL)
+					if err != nil {
+						return err
+					}
+
+					if m := regexp.MustCompile(".+/([0-9]+)$").FindStringSubmatch(prUrl.Path); len(m) == 2 {
+						prNumber, _ := strconv.Atoi(m[1])
+						pr, _, err := gh.PullRequests.Get(ctx, githubPath[0], githubPath[1], prNumber)
+						if err != nil {
+							return err
+						}
+
+						if pr.Head != nil && pr.Head.Ref != nil && *pr.Head.Ref == mr.SourceBranch && pr.Base != nil && pr.Base.Ref != nil && *pr.Base.Ref == mr.TargetBranch {
+							logger.Debug("found existing pull request", "repo", project[1], "source", mr.SourceBranch, "target", mr.TargetBranch)
+							existingPullRequest = pr
+						}
+					}
+				}
+			}
+
+			githubAuthorName := mr.Author.Name
+
+			author, _, err := gl.Users.GetUser(mr.Author.ID, gitlab.GetUsersOptions{})
+			if err != nil {
+				return err
+			}
+			if author.WebsiteURL != "" {
+				githubAuthorName = "@" + strings.TrimPrefix(strings.ToLower(author.WebsiteURL), "https://github.com/")
+			}
+
+			originalState := ""
+			if !strings.EqualFold(mr.State, "opened") {
+				originalState = fmt.Sprintf("> This merge request was originally **%s** on GitLab", mr.State)
+			}
+
+			body := fmt.Sprintf(`> [!NOTE]
+> This pull request was migrated from GitLab
+>
+> Original Author: %[1]s
+> GitLab Project: %[4]s/%[5]s
+> GitLab MR Number: %[2]d
+> Date Originally Opened: %[6]s
+>
+%[7]s
+
+## Original Description
+
+%[3]s`, githubAuthorName, mr.IID, mr.Description, gitlabPath[0], gitlabPath[1], mr.CreatedAt.Format("Mon, 2 Jan 2006"), originalState)
+
+			if existingPullRequest == nil {
+				logger.Debug("creating pull request", "repo", project[1], "source", mr.SourceBranch, "target", mr.TargetBranch)
+				pullRequest := github.NewPullRequest{
+					Title:               &mr.Title,
+					Head:                &mr.SourceBranch,
+					Base:                &mr.TargetBranch,
+					Body:                &body,
+					MaintainerCanModify: pointer(true),
+					Draft:               &mr.Draft,
+				}
+				_, _, err = gh.PullRequests.Create(ctx, githubPath[0], githubPath[1], &pullRequest)
+				if err != nil {
+					return err
+				}
+
+			} else {
+				logger.Debug("updating pull request", "repo", project[1], "source", mr.SourceBranch, "target", mr.TargetBranch)
+
+				var newState *string
+				switch mr.State {
+				case "opened":
+					newState = pointer("open")
+				case "closed", "merged":
+					newState = pointer("closed")
+				}
+
+				existingPullRequest.Title = &mr.Title
+				existingPullRequest.Body = &body
+				existingPullRequest.Draft = &mr.Draft
+				existingPullRequest.State = newState
+				if _, _, err = gh.PullRequests.Edit(ctx, githubPath[0], githubPath[1], existingPullRequest.GetNumber(), existingPullRequest); err != nil {
+					return err
+				}
+			}
+		}
 
 		//pullRequests, _, err := gh.PullRequests.List(ctx, githubPath[0], githubPath[1], nil)
 		//if err != nil {
