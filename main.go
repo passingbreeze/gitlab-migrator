@@ -16,6 +16,7 @@ import (
 
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/config"
+	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/storage/memory"
 	"github.com/google/go-github/v66/github"
 	"github.com/hashicorp/go-hclog"
@@ -304,13 +305,33 @@ func performMigration(ctx context.Context, projects Projects) error {
 			return err
 		}
 
+		// Iterate GitLab merge requests
 		for _, mergeRequest := range mergeRequests {
 			if mergeRequest == nil {
 				continue
 			}
 
 			if !strings.EqualFold(mergeRequest.State, "opened") {
-				logger.Trace("TODO: check for branch of closed/merged MR and recreate it temporarily as needed")
+				logger.Trace("searching for existing branch for closed/merged merge request", "name", gitlabPath[1], "group", gitlabPath[0], "project_id", match.ID, "merge_request_id", mergeRequest.IID, "source_branch", mergeRequest.SourceBranch)
+
+				if _, err = repo.Reference(plumbing.ReferenceName(mergeRequest.SourceBranch), false); err != nil {
+
+					logger.Trace("recreating branch for closed/merged merge request", "name", gitlabPath[1], "group", gitlabPath[0], "project_id", match.ID, "merge_request_id", mergeRequest.IID, "source_branch", mergeRequest.SourceBranch)
+					branchName := plumbing.NewBranchReferenceName(mergeRequest.SourceBranch)
+					branch := plumbing.NewHashReference(branchName, plumbing.NewHash(mergeRequest.SHA))
+					if err = repo.Storer.SetReference(branch); err != nil {
+						return err
+					}
+
+					logger.Debug("pushing branch for closed/merged merge request", "repo", project[1], "source_branch", branchName)
+					if err = repo.PushContext(ctx, &git.PushOptions{
+						RemoteName: "github",
+						RefSpecs:   []config.RefSpec{config.RefSpec(fmt.Sprintf("refs/heads/%[1]s:refs/heads/%[1]s", mergeRequest.SourceBranch))},
+						Force:      true,
+					}); err != nil {
+						return err
+					}
+				}
 			}
 
 			var pullRequest *github.PullRequest
@@ -322,6 +343,7 @@ func performMigration(ctx context.Context, projects Projects) error {
 				return err
 			}
 
+			// Look for an existing GitHub pull request having the same source and head (target) branch
 			for _, issue := range searchResult.Issues {
 				if issue == nil {
 					continue
