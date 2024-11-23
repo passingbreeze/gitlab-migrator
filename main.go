@@ -164,13 +164,18 @@ func main() {
 }
 
 func performMigration(ctx context.Context, projects []Project) (int, error) {
-	logger.Info(fmt.Sprintf("processing %d project(s) with %d workers", len(projects), maxConcurrency))
+	concurrency := maxConcurrency
+	if len(projects) < maxConcurrency {
+		concurrency = len(projects)
+	}
+
+	logger.Info(fmt.Sprintf("processing %d project(s) with %d workers", len(projects), concurrency))
 
 	var wg sync.WaitGroup
 	var errCount int
-	queue := make(chan Project, maxConcurrency*2)
+	queue := make(chan Project, concurrency*2)
 
-	for i := 0; i < maxConcurrency; i++ {
+	for i := 0; i < concurrency; i++ {
 		wg.Add(1)
 
 		go func() {
