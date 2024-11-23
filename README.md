@@ -48,6 +48,8 @@ Written in Go, this is a cross-platform CLI utility that accepts the following r
     	rename master branch to main and update pull requests (defaults to: false)
 ```
 
+Use the `-github-user` argument to specify the GitHub username for whom the authentication token was issued (mandatory).
+
 You can specify an individual GitLab project with the `-gitlab-project` argument, along with the target GitHub repository with the `-github-repo` argument.
 
 Alternatively, you can supply the path to a CSV file with the `-projects-csv` argument, which should contain two columns:
