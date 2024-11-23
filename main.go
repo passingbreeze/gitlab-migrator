@@ -14,9 +14,11 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/go-git/go-billy/v5/memfs"
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/go-git/go-git/v5/storage/memory"
 	"github.com/google/go-github/v66/github"
 	"github.com/hashicorp/go-hclog"
@@ -264,8 +266,11 @@ func performMigration(ctx context.Context, projects Projects) error {
 		cloneUrl.User = url.UserPassword("oauth2", gitlabToken)
 		cloneUrlWithCredentials := cloneUrl.String()
 
+		// In-memory filesystem for worktree operations
+		fs := memfs.New()
+
 		logger.Debug("cloning repository", "name", gitlabPath[1], "group", gitlabPath[0], "url", project.HTTPURLToRepo)
-		repo, err := git.CloneContext(ctx, memory.NewStorage(), nil, &git.CloneOptions{
+		repo, err := git.CloneContext(ctx, memory.NewStorage(), fs, &git.CloneOptions{
 			URL:        cloneUrlWithCredentials,
 			Auth:       nil,
 			RemoteName: "gitlab",
@@ -330,6 +335,8 @@ func performMigration(ctx context.Context, projects Projects) error {
 				continue
 			}
 
+			var cleanUpBranch bool
+
 			if renameMasterToMain && mergeRequest.TargetBranch == "master" {
 				logger.Trace("changing target branch from master to main", "name", gitlabPath[1], "group", gitlabPath[0], "project_id", project.ID, "merge_request_id", mergeRequest.IID)
 				mergeRequest.TargetBranch = "main"
@@ -340,18 +347,95 @@ func performMigration(ctx context.Context, projects Projects) error {
 
 				if _, err = repo.Reference(plumbing.ReferenceName(mergeRequest.SourceBranch), false); err != nil {
 
-					logger.Trace("recreating branch for closed/merged merge request", "name", gitlabPath[1], "group", gitlabPath[0], "project_id", project.ID, "merge_request_id", mergeRequest.IID, "source_branch", mergeRequest.SourceBranch)
-					branchName := plumbing.NewBranchReferenceName(mergeRequest.SourceBranch)
-					branch := plumbing.NewHashReference(branchName, plumbing.NewHash(mergeRequest.SHA))
-					if err = repo.Storer.SetReference(branch); err != nil {
+					logger.Trace("inspecting merge commit parents", "name", gitlabPath[1], "group", gitlabPath[0], "project_id", project.ID, "merge_request_id", mergeRequest.IID, "sha", mergeRequest.MergeCommitSHA)
+					mergeCommit, err := object.GetCommit(repo.Storer, plumbing.NewHash(mergeRequest.MergeCommitSHA))
+					if err != nil {
 						return err
 					}
 
-					logger.Debug("pushing branch for closed/merged merge request", "repo", proj[1], "source_branch", branchName)
+					parents := make([]*object.Commit, 0)
+					if err = mergeCommit.Parents().ForEach(func(commit *object.Commit) error {
+						parents = append(parents, commit)
+						return nil
+					}); err != nil {
+						return err
+					}
+
+					if len(parents) != 2 {
+						return fmt.Errorf("encountered merge commit without 2 parents")
+					}
+
+					var startHash, endHash plumbing.Hash
+					if parents[0].Committer.When.Before(parents[1].Committer.When) {
+						startHash = parents[0].Hash
+						endHash = parents[1].Hash
+					} else {
+						startHash = parents[1].Hash
+						endHash = parents[0].Hash
+					}
+
+					worktree, err := repo.Worktree()
+					if err != nil {
+						return err
+					}
+
+					mergeRequest.SourceBranch = fmt.Sprintf("migration-source/%s", mergeRequest.SourceBranch)
+					mergeRequest.TargetBranch = fmt.Sprintf("migration-target/%s", mergeRequest.TargetBranch)
+
+					logger.Trace("creating target branch for closed/merged merge request", "name", gitlabPath[1], "group", gitlabPath[0], "project_id", project.ID, "merge_request_id", mergeRequest.IID, "branch", mergeRequest.TargetBranch, "sha", startHash)
+					if err = worktree.Checkout(&git.CheckoutOptions{
+						Create: true,
+						Branch: plumbing.NewBranchReferenceName(mergeRequest.TargetBranch),
+						Hash:   startHash,
+					}); err != nil {
+						return err
+					}
+
+					logger.Trace("creating source branch for closed/merged merge request", "name", gitlabPath[1], "group", gitlabPath[0], "project_id", project.ID, "merge_request_id", mergeRequest.IID, "branch", mergeRequest.SourceBranch, "sha", endHash)
+					branchName := plumbing.NewBranchReferenceName(mergeRequest.SourceBranch)
+					if err = worktree.Checkout(&git.CheckoutOptions{
+						Create: true,
+						Branch: plumbing.NewBranchReferenceName(mergeRequest.SourceBranch),
+						Hash:   endHash,
+					}); err != nil {
+						return err
+					}
+
+					//noticeFile, err := fs.Create("__notice.txt")
+					//if err != nil {
+					//	return err
+					//}
+					//
+					//if _, err = noticeFile.Write([]byte("NOTICE: This file was committed to facilitate migrating the pull request from GitLab to GitHub, and is not present in the original branch and was not merged")); err != nil {
+					//	return err
+					//}
+					//
+					//if err = noticeFile.Close(); err != nil {
+					//	return err
+					//}
+					//
+					//if _, err = worktree.Add("__notice.txt"); err != nil {
+					//	return err
+					//}
+					//
+					//if _, err = worktree.Commit("MIGRATION-ONLY: Do not merge", &git.CommitOptions{
+					//	Author: &object.Signature{
+					//		Name:  "GitLab Migrator",
+					//		Email: "notreal@gitlab-migrator.internal",
+					//		When:  time.Now(),
+					//	},
+					//}); err != nil {
+					//	return err
+					//}
+
+					logger.Debug("pushing branches for closed/merged merge request", "repo", proj[1], "source_branch", branchName)
 					if err = repo.PushContext(ctx, &git.PushOptions{
 						RemoteName: "github",
-						RefSpecs:   []config.RefSpec{config.RefSpec(fmt.Sprintf("refs/heads/%[1]s:refs/heads/%[1]s", mergeRequest.SourceBranch))},
-						Force:      true,
+						RefSpecs: []config.RefSpec{
+							config.RefSpec(fmt.Sprintf("refs/heads/%[1]s:refs/heads/%[1]s", mergeRequest.SourceBranch)),
+							config.RefSpec(fmt.Sprintf("refs/heads/%[1]s:refs/heads/%[1]s", mergeRequest.TargetBranch)),
+						},
+						Force: true,
 					}); err != nil {
 						uptodateError := errors.New("already up-to-date")
 						if errors.As(err, &uptodateError) {
@@ -360,12 +444,9 @@ func performMigration(ctx context.Context, projects Projects) error {
 							return err
 						}
 					}
-				}
-			}
 
-			// TODO: temporarily skipping unopened PRs because we need a diff before we can recreate them
-			if !strings.EqualFold(mergeRequest.State, "opened") {
-				continue
+					cleanUpBranch = true
+				}
 			}
 
 			var pullRequest *github.PullRequest
@@ -484,6 +565,14 @@ func performMigration(ctx context.Context, projects Projects) error {
 					return err
 				}
 
+				if mergeRequest.State == "closed" || mergeRequest.State == "merged" {
+					pullRequest.State = pointer("closed")
+
+					if pullRequest, _, err = gh.PullRequests.Edit(ctx, githubPath[0], githubPath[1], pullRequest.GetNumber(), pullRequest); err != nil {
+						return err
+					}
+				}
+
 			} else {
 				logger.Debug("updating pull request", "repo", proj[1], "source", mergeRequest.SourceBranch, "target", mergeRequest.TargetBranch)
 
@@ -502,6 +591,10 @@ func performMigration(ctx context.Context, projects Projects) error {
 				if pullRequest, _, err = gh.PullRequests.Edit(ctx, githubPath[0], githubPath[1], pullRequest.GetNumber(), pullRequest); err != nil {
 					return err
 				}
+			}
+
+			if cleanUpBranch {
+				// TODO clean up temporary branch
 			}
 
 			logger.Debug("retrieving GitLab merge request comments", "name", gitlabPath[1], "group", gitlabPath[0], "project_id", project.ID, "merge_request_id", mergeRequest.IID)
