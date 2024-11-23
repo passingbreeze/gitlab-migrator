@@ -337,11 +337,6 @@ func performMigration(ctx context.Context, projects Projects) error {
 
 			var cleanUpBranch bool
 
-			if renameMasterToMain && mergeRequest.TargetBranch == "master" {
-				logger.Trace("changing target branch from master to main", "name", gitlabPath[1], "group", gitlabPath[0], "project_id", project.ID, "merge_request_id", mergeRequest.IID)
-				mergeRequest.TargetBranch = "main"
-			}
-
 			if !strings.EqualFold(mergeRequest.State, "opened") {
 				logger.Trace("searching for existing branch for closed/merged merge request", "name", gitlabPath[1], "group", gitlabPath[0], "project_id", project.ID, "merge_request_id", mergeRequest.IID, "source_branch", mergeRequest.SourceBranch)
 
@@ -353,6 +348,7 @@ func performMigration(ctx context.Context, projects Projects) error {
 						return err
 					}
 
+					// Get all parent commits of the merge commit
 					parents := make([]*object.Commit, 0)
 					if err = mergeCommit.Parents().ForEach(func(commit *object.Commit) error {
 						parents = append(parents, commit)
@@ -361,10 +357,12 @@ func performMigration(ctx context.Context, projects Projects) error {
 						return err
 					}
 
+					// MRs should create merges with two parents - for now we'll abort if this isn't the case
 					if len(parents) != 2 {
 						return fmt.Errorf("encountered merge commit without 2 parents")
 					}
 
+					// Determine which parent commit is the oldest and assume that is from the head branch
 					var startHash, endHash plumbing.Hash
 					if parents[0].Committer.When.Before(parents[1].Committer.When) {
 						startHash = parents[0].Hash
@@ -374,33 +372,37 @@ func performMigration(ctx context.Context, projects Projects) error {
 						endHash = parents[0].Hash
 					}
 
+					// Create a worktree
 					worktree, err := repo.Worktree()
 					if err != nil {
 						return err
 					}
 
-					mergeRequest.SourceBranch = fmt.Sprintf("migration-source/%s", mergeRequest.SourceBranch)
-					mergeRequest.TargetBranch = fmt.Sprintf("migration-target/%s", mergeRequest.TargetBranch)
+					// Generate temporary branch names
+					mergeRequest.SourceBranch = fmt.Sprintf("migration-source-%d/%s", mergeRequest.IID, mergeRequest.SourceBranch)
+					mergeRequest.TargetBranch = fmt.Sprintf("migration-target-%d/%s", mergeRequest.IID, mergeRequest.TargetBranch)
 
-					logger.Trace("creating target branch for closed/merged merge request", "name", gitlabPath[1], "group", gitlabPath[0], "project_id", project.ID, "merge_request_id", mergeRequest.IID, "branch", mergeRequest.TargetBranch, "sha", startHash)
+					logger.Trace("creating target branch for merged/closed merge request", "name", gitlabPath[1], "group", gitlabPath[0], "project_id", project.ID, "merge_request_id", mergeRequest.IID, "branch", mergeRequest.TargetBranch, "sha", startHash)
 					if err = worktree.Checkout(&git.CheckoutOptions{
 						Create: true,
+						Force:  true,
 						Branch: plumbing.NewBranchReferenceName(mergeRequest.TargetBranch),
 						Hash:   startHash,
 					}); err != nil {
 						return err
 					}
 
-					logger.Trace("creating source branch for closed/merged merge request", "name", gitlabPath[1], "group", gitlabPath[0], "project_id", project.ID, "merge_request_id", mergeRequest.IID, "branch", mergeRequest.SourceBranch, "sha", endHash)
+					logger.Trace("creating source branch for merged/closed merge request", "name", gitlabPath[1], "group", gitlabPath[0], "project_id", project.ID, "merge_request_id", mergeRequest.IID, "branch", mergeRequest.SourceBranch, "sha", endHash)
 					if err = worktree.Checkout(&git.CheckoutOptions{
 						Create: true,
+						Force:  true,
 						Branch: plumbing.NewBranchReferenceName(mergeRequest.SourceBranch),
 						Hash:   endHash,
 					}); err != nil {
 						return err
 					}
 
-					logger.Debug("pushing branches for closed/merged merge request", "repo", proj[1], "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch)
+					logger.Debug("pushing branches for merged/closed merge request", "repo", proj[1], "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch)
 					if err = repo.PushContext(ctx, &git.PushOptions{
 						RemoteName: "github",
 						RefSpecs: []config.RefSpec{
@@ -420,6 +422,11 @@ func performMigration(ctx context.Context, projects Projects) error {
 					// We will clean up these temporary branches after configuring and closing the pull request
 					cleanUpBranch = true
 				}
+			}
+
+			if renameMasterToMain && mergeRequest.TargetBranch == "master" {
+				logger.Trace("changing target branch from master to main", "name", gitlabPath[1], "group", gitlabPath[0], "project_id", project.ID, "merge_request_id", mergeRequest.IID)
+				mergeRequest.TargetBranch = "main"
 			}
 
 			var pullRequest *github.PullRequest
@@ -539,15 +546,16 @@ func performMigration(ctx context.Context, projects Projects) error {
 				}
 
 				if mergeRequest.State == "closed" || mergeRequest.State == "merged" {
-					pullRequest.State = pointer("closed")
+					logger.Debug("closing pull request", "repo", proj[1], "source", mergeRequest.SourceBranch, "target", mergeRequest.TargetBranch, "pull_request_id", pullRequest.GetNumber())
 
+					pullRequest.State = pointer("closed")
 					if pullRequest, _, err = gh.PullRequests.Edit(ctx, githubPath[0], githubPath[1], pullRequest.GetNumber(), pullRequest); err != nil {
 						return err
 					}
 				}
 
 			} else {
-				logger.Debug("updating pull request", "repo", proj[1], "source", mergeRequest.SourceBranch, "target", mergeRequest.TargetBranch)
+				logger.Debug("updating pull request", "repo", proj[1], "source", mergeRequest.SourceBranch, "target", mergeRequest.TargetBranch, "pull_request_id", pullRequest.GetNumber())
 
 				var newState *string
 				switch mergeRequest.State {
@@ -567,7 +575,7 @@ func performMigration(ctx context.Context, projects Projects) error {
 			}
 
 			if cleanUpBranch {
-				logger.Debug("deleting temporary branches for closed/merged merge request", "repo", proj[1], "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch)
+				logger.Debug("deleting temporary branches for closed pull request", "repo", proj[1], "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch, "pull_request_id", pullRequest.GetNumber())
 				if err = repo.PushContext(ctx, &git.PushOptions{
 					RemoteName: "github",
 					RefSpecs: []config.RefSpec{
