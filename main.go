@@ -315,8 +315,8 @@ func performMigration(ctx context.Context, projects Projects) error {
 			Force:      true,
 			//Prune:      true, // causes error, attempts to delete main branch
 		}); err != nil {
-			uptodateError := errors.New("already up-to-date")
-			if errors.As(err, &uptodateError) {
+			upToDateError := errors.New("already up-to-date")
+			if errors.As(err, &upToDateError) {
 				logger.Debug("repository already up-to-date on GitHub", "name", gitlabPath[1], "group", gitlabPath[0], "url", githubUrl)
 			} else {
 				return err
@@ -392,7 +392,6 @@ func performMigration(ctx context.Context, projects Projects) error {
 					}
 
 					logger.Trace("creating source branch for closed/merged merge request", "name", gitlabPath[1], "group", gitlabPath[0], "project_id", project.ID, "merge_request_id", mergeRequest.IID, "branch", mergeRequest.SourceBranch, "sha", endHash)
-					branchName := plumbing.NewBranchReferenceName(mergeRequest.SourceBranch)
 					if err = worktree.Checkout(&git.CheckoutOptions{
 						Create: true,
 						Branch: plumbing.NewBranchReferenceName(mergeRequest.SourceBranch),
@@ -401,34 +400,7 @@ func performMigration(ctx context.Context, projects Projects) error {
 						return err
 					}
 
-					//noticeFile, err := fs.Create("__notice.txt")
-					//if err != nil {
-					//	return err
-					//}
-					//
-					//if _, err = noticeFile.Write([]byte("NOTICE: This file was committed to facilitate migrating the pull request from GitLab to GitHub, and is not present in the original branch and was not merged")); err != nil {
-					//	return err
-					//}
-					//
-					//if err = noticeFile.Close(); err != nil {
-					//	return err
-					//}
-					//
-					//if _, err = worktree.Add("__notice.txt"); err != nil {
-					//	return err
-					//}
-					//
-					//if _, err = worktree.Commit("MIGRATION-ONLY: Do not merge", &git.CommitOptions{
-					//	Author: &object.Signature{
-					//		Name:  "GitLab Migrator",
-					//		Email: "notreal@gitlab-migrator.internal",
-					//		When:  time.Now(),
-					//	},
-					//}); err != nil {
-					//	return err
-					//}
-
-					logger.Debug("pushing branches for closed/merged merge request", "repo", proj[1], "source_branch", branchName)
+					logger.Debug("pushing branches for closed/merged merge request", "repo", proj[1], "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch)
 					if err = repo.PushContext(ctx, &git.PushOptions{
 						RemoteName: "github",
 						RefSpecs: []config.RefSpec{
@@ -437,14 +409,15 @@ func performMigration(ctx context.Context, projects Projects) error {
 						},
 						Force: true,
 					}); err != nil {
-						uptodateError := errors.New("already up-to-date")
-						if errors.As(err, &uptodateError) {
-							logger.Debug("branch already exists and is up-to-date on GitHub", "repo", proj[1], "source_branch", branchName)
+						upToDateError := errors.New("already up-to-date")
+						if errors.As(err, &upToDateError) {
+							logger.Debug("branch already exists and is up-to-date on GitHub", "repo", proj[1], "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch)
 						} else {
 							return err
 						}
 					}
 
+					// We will clean up these temporary branches after configuring and closing the pull request
 					cleanUpBranch = true
 				}
 			}
@@ -594,7 +567,22 @@ func performMigration(ctx context.Context, projects Projects) error {
 			}
 
 			if cleanUpBranch {
-				// TODO clean up temporary branch
+				logger.Debug("deleting temporary branches for closed/merged merge request", "repo", proj[1], "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch)
+				if err = repo.PushContext(ctx, &git.PushOptions{
+					RemoteName: "github",
+					RefSpecs: []config.RefSpec{
+						config.RefSpec(fmt.Sprintf(":refs/heads/%s", mergeRequest.SourceBranch)),
+						config.RefSpec(fmt.Sprintf(":refs/heads/%s", mergeRequest.TargetBranch)),
+					},
+					Force: true,
+				}); err != nil {
+					upToDateError := errors.New("already up-to-date")
+					if errors.As(err, &upToDateError) {
+						logger.Debug("branches already deleted on GitHub", "repo", proj[1], "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch)
+					} else {
+						return err
+					}
+				}
 			}
 
 			logger.Debug("retrieving GitLab merge request comments", "name", gitlabPath[1], "group", gitlabPath[0], "project_id", project.ID, "merge_request_id", mergeRequest.IID)
