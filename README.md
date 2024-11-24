@@ -22,7 +22,7 @@ Golang 1.23 was used, you may have luck with earlier releases.
 _Example Usage_
 
 ```
-gitlab-migrator -gitlab-project=mygitlabuser/myproject -github-repo=mygithubuser/myrepo
+gitlab-migrator -github-user=mytokenuser -gitlab-project=mygitlabuser/myproject -github-repo=mygithubuser/myrepo
 ```
 
 Written in Go, this is a cross-platform CLI utility that accepts the following runtime arguments:
