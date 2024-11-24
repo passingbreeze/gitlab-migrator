@@ -28,6 +28,7 @@ import (
 )
 
 const (
+	dateFormat          = "Mon, 2 Jan 2006"
 	defaultGithubDomain = "github.com"
 	defaultGitlabDomain = "gitlab.com"
 )
@@ -549,6 +550,13 @@ func migrateProject(ctx context.Context, proj []string, gitlabPath []string, git
 			approval = "_No approvers_"
 		}
 
+		closeDate := ""
+		if mergeRequest.State == "closed" && mergeRequest.ClosedAt != nil {
+			closeDate = fmt.Sprintf("\n> | **Date Originally Closed** | %s |", mergeRequest.ClosedAt.Format(dateFormat))
+		} else if mergeRequest.State == "merged" && mergeRequest.MergedAt != nil {
+			closeDate = fmt.Sprintf("\n> | **Date Originally Merged** | %s |", mergeRequest.MergedAt.Format(dateFormat))
+		}
+
 		body := fmt.Sprintf(`> [!NOTE]
 > This pull request was migrated from GitLab
 >
@@ -557,7 +565,7 @@ func migrateProject(ctx context.Context, proj []string, gitlabPath []string, git
 > | **Original Author** | %[1]s |
 > | **GitLab Project** | %[4]s/%[5]s |
 > | **GitLab MR Number** | %[2]d |
-> | **Date Originally Opened** | %[6]s |
+> | **Date Originally Opened** | %[6]s |%[9]s
 > | **Approved on GitLab by** | %[8]s |
 > |      |      |
 >
@@ -565,7 +573,7 @@ func migrateProject(ctx context.Context, proj []string, gitlabPath []string, git
 
 ## Original Description
 
-%[3]s`, githubAuthorName, mergeRequest.IID, description, gitlabPath[0], gitlabPath[1], mergeRequest.CreatedAt.Format("Mon, 2 Jan 2006"), originalState, approval)
+%[3]s`, githubAuthorName, mergeRequest.IID, description, gitlabPath[0], gitlabPath[1], mergeRequest.CreatedAt.Format(dateFormat), originalState, approval, closeDate)
 
 		if pullRequest == nil {
 			logger.Debug("creating pull request", "repo", proj[1], "source", mergeRequest.SourceBranch, "target", mergeRequest.TargetBranch)
