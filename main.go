@@ -373,10 +373,49 @@ func migrateProject(ctx context.Context, proj []string, gitlabPath []string, git
 		}
 
 		var cleanUpBranch bool
+		var pullRequest *github.PullRequest
 
-		if !strings.EqualFold(mergeRequest.State, "opened") {
+		logger.Debug("searching for any existing pull request", "repo", proj[1], "merge_request_id", mergeRequest.IID)
+		//query := fmt.Sprintf("repo:%s/%s is:pr head:%s", githubPath[0], githubPath[1], mergeRequest.SourceBranch)
+		query := fmt.Sprintf("repo:%s/%s is:pr", githubPath[0], githubPath[1])
+		searchResult, _, err := gh.Search.Issues(ctx, query, nil)
+		if err != nil {
+			return fmt.Errorf("listing pull requests: %v", err)
+		}
+
+		// Look for an existing GitHub pull request
+		for _, issue := range searchResult.Issues {
+			if issue == nil {
+				continue
+			}
+
+			if issue.IsPullRequest() {
+				// Extract the PR number from the URL
+				prUrl, err := url.Parse(*issue.PullRequestLinks.URL)
+				if err != nil {
+					return fmt.Errorf("parsing pull request url: %v", err)
+				}
+
+				if m := regexp.MustCompile(".+/([0-9]+)$").FindStringSubmatch(prUrl.Path); len(m) == 2 {
+					prNumber, _ := strconv.Atoi(m[1])
+					pr, _, err := gh.PullRequests.Get(ctx, githubPath[0], githubPath[1], prNumber)
+					if err != nil {
+						return fmt.Errorf("retrieving pull request: %v", err)
+					}
+
+					if strings.Contains(pr.GetBody(), fmt.Sprintf("**GitLab MR Number** | %d", mergeRequest.IID)) {
+						logger.Debug("found existing pull request", "repo", proj[1], "pull_request_id", pr.GetID())
+						pullRequest = pr
+					}
+				}
+			}
+		}
+
+		// proceed to create temporary branches when migrating a merged/closed merge request that doesn't yet have a counterpart PR in GitHub (can't create one without a branch)
+		if pullRequest == nil && !strings.EqualFold(mergeRequest.State, "opened") {
 			logger.Trace("searching for existing branch for closed/merged merge request", "name", gitlabPath[1], "group", gitlabPath[0], "project_id", project.ID, "merge_request_id", mergeRequest.IID, "source_branch", mergeRequest.SourceBranch)
 
+			// only create temporary branches if the source branch has been deleted
 			if _, err = repo.Reference(plumbing.ReferenceName(mergeRequest.SourceBranch), false); err != nil {
 
 				logger.Trace("inspecting merge commit parents", "name", gitlabPath[1], "group", gitlabPath[0], "project_id", project.ID, "merge_request_id", mergeRequest.IID, "sha", mergeRequest.MergeCommitSHA)
@@ -466,43 +505,6 @@ func migrateProject(ctx context.Context, proj []string, gitlabPath []string, git
 			mergeRequest.TargetBranch = "main"
 		}
 
-		var pullRequest *github.PullRequest
-
-		logger.Debug("searching for any existing pull request", "repo", proj[1], "source", mergeRequest.SourceBranch, "target", mergeRequest.TargetBranch)
-		query := fmt.Sprintf("repo:%s/%s is:pr head:%s", githubPath[0], githubPath[1], mergeRequest.SourceBranch)
-		searchResult, _, err := gh.Search.Issues(ctx, query, nil)
-		if err != nil {
-			return fmt.Errorf("listing pull requests: %v", err)
-		}
-
-		// Look for an existing GitHub pull request having the same source and head (target) branch
-		for _, issue := range searchResult.Issues {
-			if issue == nil {
-				continue
-			}
-
-			if issue.IsPullRequest() {
-				// Extract the PR number from the URL
-				prUrl, err := url.Parse(*issue.PullRequestLinks.URL)
-				if err != nil {
-					return fmt.Errorf("parsing pull request url: %v", err)
-				}
-
-				if m := regexp.MustCompile(".+/([0-9]+)$").FindStringSubmatch(prUrl.Path); len(m) == 2 {
-					prNumber, _ := strconv.Atoi(m[1])
-					pr, _, err := gh.PullRequests.Get(ctx, githubPath[0], githubPath[1], prNumber)
-					if err != nil {
-						return fmt.Errorf("retrieving pull request: %v", err)
-					}
-
-					if pr.Head != nil && pr.Head.Ref != nil && *pr.Head.Ref == mergeRequest.SourceBranch && pr.Base != nil && pr.Base.Ref != nil && *pr.Base.Ref == mergeRequest.TargetBranch {
-						logger.Debug("found existing pull request", "repo", proj[1], "source", mergeRequest.SourceBranch, "target", mergeRequest.TargetBranch)
-						pullRequest = pr
-					}
-				}
-			}
-		}
-
 		githubAuthorName := mergeRequest.Author.Name
 
 		author, err := getGitlabUser(mergeRequest.Author.Username)
@@ -565,15 +567,15 @@ func migrateProject(ctx context.Context, proj []string, gitlabPath []string, git
 > | **Original Author** | %[1]s |
 > | **GitLab Project** | %[4]s/%[5]s |
 > | **GitLab MR Number** | %[2]d |
-> | **Date Originally Opened** | %[6]s |%[9]s
+> | **Date Originally Opened** | %[6]s |%[7]s
 > | **Approved on GitLab by** | %[8]s |
 > |      |      |
 >
-%[7]s
+%[9]s
 
 ## Original Description
 
-%[3]s`, githubAuthorName, mergeRequest.IID, description, gitlabPath[0], gitlabPath[1], mergeRequest.CreatedAt.Format(dateFormat), originalState, approval, closeDate)
+%[3]s`, githubAuthorName, mergeRequest.IID, description, gitlabPath[0], gitlabPath[1], mergeRequest.CreatedAt.Format(dateFormat), closeDate, approval, originalState)
 
 		if pullRequest == nil {
 			logger.Debug("creating pull request", "repo", proj[1], "source", mergeRequest.SourceBranch, "target", mergeRequest.TargetBranch)
