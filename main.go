@@ -254,10 +254,7 @@ func performMigration(ctx context.Context, projects []Project) (int, error) {
 			defer wg.Done()
 
 			for proj := range queue {
-				gitlabPath := strings.Split(proj[0], "/")
-				githubPath := strings.Split(proj[1], "/")
-
-				if err := migrateProject(ctx, proj, gitlabPath, githubPath); err != nil {
+				if err := migrateProject(ctx, proj); err != nil {
 					errCount++
 					logger.Error(err.Error())
 				}
@@ -275,7 +272,10 @@ func performMigration(ctx context.Context, projects []Project) (int, error) {
 	return errCount, nil
 }
 
-func migrateProject(ctx context.Context, proj []string, gitlabPath []string, githubPath []string) error {
+func migrateProject(ctx context.Context, proj []string) error {
+	gitlabPath := strings.Split(proj[0], "/")
+	githubPath := strings.Split(proj[1], "/")
+
 	logger.Info("searching for GitLab project", "name", gitlabPath[1], "group", gitlabPath[0])
 	searchTerm := gitlabPath[1]
 	projectResult, _, err := gl.Projects.ListProjects(&gitlab.ListProjectsOptions{Search: &searchTerm})
@@ -449,7 +449,7 @@ func migrateProject(ctx context.Context, proj []string, gitlabPath []string, git
 		logger.Debug("searching for any existing pull request", "repo", proj[1], "merge_request_id", mergeRequest.IID)
 		//query := fmt.Sprintf("repo:%s/%s is:pr head:%s", githubPath[0], githubPath[1], mergeRequest.SourceBranch)
 		query := fmt.Sprintf("repo:%s/%s is:pr", githubPath[0], githubPath[1])
-		searchResult, _, err := gh.Search.Issues(ctx, query, nil)
+		searchResult, err := getGithubSearchResults(ctx, query)
 		if err != nil {
 			return fmt.Errorf("listing pull requests: %v", err)
 		}
@@ -469,7 +469,7 @@ func migrateProject(ctx context.Context, proj []string, gitlabPath []string, git
 
 				if m := regexp.MustCompile(".+/([0-9]+)$").FindStringSubmatch(prUrl.Path); len(m) == 2 {
 					prNumber, _ := strconv.Atoi(m[1])
-					pr, _, err := gh.PullRequests.Get(ctx, githubPath[0], githubPath[1], prNumber)
+					pr, err := getGithubPullRequest(ctx, githubPath[0], githubPath[1], prNumber)
 					if err != nil {
 						return fmt.Errorf("retrieving pull request: %v", err)
 					}
@@ -801,6 +801,49 @@ func migrateProject(ctx context.Context, proj []string, gitlabPath []string, git
 	}
 
 	return nil
+}
+
+func getGithubPullRequest(ctx context.Context, org, repo string, prNumber int) (*github.PullRequest, error) {
+	var err error
+	cacheToken := fmt.Sprintf("%s/%s/%d", org, repo, prNumber)
+	pullRequest := cache.getGithubPullRequest(cacheToken)
+	if pullRequest == nil {
+		logger.Debug("retrieving user details", "org", org, "repo", repo, "pr_number", prNumber)
+		pullRequest, _, err = gh.PullRequests.Get(ctx, org, repo, prNumber)
+		if err != nil {
+			return nil, fmt.Errorf("retrieving pull request: %v", err)
+		}
+
+		if pullRequest == nil {
+			return nil, fmt.Errorf("nil pull request was returned: %d", prNumber)
+		}
+
+		logger.Trace("caching GitHub user", "org", org, "repo", repo, "pr_number", prNumber)
+		cache.setGithubPullRequest(cacheToken, pullRequest)
+	}
+
+	return pullRequest, nil
+}
+
+func getGithubSearchResults(ctx context.Context, query string) (*github.IssuesSearchResult, error) {
+	var err error
+	result := cache.getGithubSearchResults(query)
+	if result == nil {
+		logger.Debug("performing search", "query", query)
+		result, _, err = gh.Search.Issues(ctx, query, nil)
+		if err != nil {
+			return nil, fmt.Errorf("performing issue search: %v", err)
+		}
+
+		if result == nil {
+			return nil, fmt.Errorf("nil search result was returned for query: %s", query)
+		}
+
+		logger.Trace("caching GitHub search result", "query", query)
+		cache.setGithubSearchResults(query, result)
+	}
+
+	return result, nil
 }
 
 func getGithubUser(ctx context.Context, username string) (*github.User, error) {

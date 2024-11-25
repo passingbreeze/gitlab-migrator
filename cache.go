@@ -8,8 +8,10 @@ import (
 )
 
 const (
-	gitlabUserCacheType uint8 = iota
+	githubPullRequestCacheType uint8 = iota
+	githubSearchResultsCacheType
 	githubUserCacheType
+	gitlabUserCacheType
 )
 
 type objectCache struct {
@@ -19,13 +21,45 @@ type objectCache struct {
 
 func newObjectCache() *objectCache {
 	store := make(map[uint8]map[string]any)
-	store[gitlabUserCacheType] = make(map[string]any)
+	store[githubPullRequestCacheType] = make(map[string]any)
+	store[githubSearchResultsCacheType] = make(map[string]any)
 	store[githubUserCacheType] = make(map[string]any)
+	store[gitlabUserCacheType] = make(map[string]any)
 
 	return &objectCache{
 		mutex: new(sync.RWMutex),
 		store: store,
 	}
+}
+
+func (c objectCache) getGithubPullRequest(query string) *github.PullRequest {
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	if v, ok := c.store[githubPullRequestCacheType][query]; ok {
+		return v.(*github.PullRequest)
+	}
+	return nil
+}
+
+func (c objectCache) setGithubPullRequest(query string, result *github.PullRequest) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	c.store[githubPullRequestCacheType][query] = result
+}
+
+func (c objectCache) getGithubSearchResults(query string) *github.IssuesSearchResult {
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	if v, ok := c.store[githubSearchResultsCacheType][query]; ok {
+		return v.(*github.IssuesSearchResult)
+	}
+	return nil
+}
+
+func (c objectCache) setGithubSearchResults(query string, result *github.IssuesSearchResult) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	c.store[githubSearchResultsCacheType][query] = result
 }
 
 func (c objectCache) getGithubUser(username string) *github.User {
