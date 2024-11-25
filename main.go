@@ -120,6 +120,8 @@ func main() {
 	retryClient := retryablehttp.NewClient()
 	retryClient.Logger = nil
 	retryClient.RetryMax = 5
+	retryClient.RetryWaitMin = 30 * time.Second
+	retryClient.RetryWaitMax = 120 * time.Second
 
 	retryClient.Backoff = func(min, max time.Duration, attemptNum int, resp *http.Response) time.Duration {
 		if resp != nil {
@@ -136,10 +138,10 @@ func main() {
 			if v, ok := resp.Header["X-Ratelimit-Remaining"]; ok {
 				if remaining, err := strconv.ParseInt(v[0], 10, 64); err == nil && remaining == 0 {
 
-					// If x-ratelimit-reset is present, wait for that number of seconds
+					// If x-ratelimit-reset is present, this indicates the UTC timestamp when we can retry
 					if w, ok := resp.Header["X-Ratelimit-Reset"]; ok {
-						if wait, err := strconv.ParseInt(w[0], 10, 64); err == nil {
-							return time.Second * time.Duration(wait)
+						if recoveryEpoch, err := strconv.ParseInt(w[0], 10, 64); err == nil {
+							return time.Until(time.Unix(recoveryEpoch, 0))
 						}
 					}
 
@@ -170,10 +172,11 @@ func main() {
 		}
 
 		retryableStatuses := []int{
-			http.StatusForbidden,
+			http.StatusTooManyRequests, // rate-limiting
+			http.StatusForbidden,       // rate-limiting
+
 			http.StatusRequestTimeout,
 			http.StatusFailedDependency,
-			http.StatusTooManyRequests,
 			http.StatusInternalServerError,
 			http.StatusBadGateway,
 			http.StatusServiceUnavailable,
