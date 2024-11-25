@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/go-git/go-billy/v5/memfs"
 	"github.com/go-git/go-git/v5"
@@ -117,6 +119,74 @@ func main() {
 	retryClient := retryablehttp.NewClient()
 	retryClient.Logger = nil
 	retryClient.RetryMax = 5
+
+	retryClient.Backoff = func(min, max time.Duration, attemptNum int, resp *http.Response) time.Duration {
+		if resp != nil {
+			// Check the Retry-After header
+			if s, ok := resp.Header["Retry-After"]; ok {
+				if sleep, err := strconv.ParseInt(s[0], 10, 64); err == nil {
+					return time.Second * time.Duration(sleep)
+				}
+			}
+
+			// Reference:
+			// - https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api?apiVersion=2022-11-28
+			// - https://docs.github.com/en/rest/using-the-rest-api/best-practices-for-using-the-rest-api?apiVersion=2022-11-28
+			if v, ok := resp.Header["X-Ratelimit-Remaining"]; ok {
+				if remaining, err := strconv.ParseInt(v[0], 10, 64); err == nil && remaining == 0 {
+
+					// If x-ratelimit-reset is present, wait for that number of seconds
+					if w, ok := resp.Header["X-Ratelimit-Reset"]; ok {
+						if wait, err := strconv.ParseInt(w[0], 10, 64); err == nil {
+							return time.Second * time.Duration(wait)
+						}
+					}
+
+					// Otherwise, wait for 60 seconds
+					return 60 * time.Second
+				}
+			}
+		}
+
+		// Exponential backoff
+		mult := math.Pow(2, float64(attemptNum)) * float64(min)
+		sleep := time.Duration(mult)
+		if float64(sleep) != mult || sleep > max {
+			sleep = max
+		}
+
+		return sleep
+	}
+
+	retryClient.CheckRetry = func(ctx context.Context, resp *http.Response, err error) (bool, error) {
+		if err != nil {
+			return false, err
+		}
+
+		// Potential connection reset
+		if resp == nil {
+			return true, nil
+		}
+
+		retryableStatuses := []int{
+			http.StatusForbidden,
+			http.StatusRequestTimeout,
+			http.StatusFailedDependency,
+			http.StatusTooManyRequests,
+			http.StatusInternalServerError,
+			http.StatusBadGateway,
+			http.StatusServiceUnavailable,
+			http.StatusGatewayTimeout,
+		}
+
+		for _, status := range retryableStatuses {
+			if resp.StatusCode == status {
+				return true, nil
+			}
+		}
+
+		return false, nil
+	}
 
 	client = retryClient.StandardClient()
 
