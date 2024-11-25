@@ -504,6 +504,11 @@ func migrateProject(ctx context.Context, proj []string, gitlabPath []string, git
 					return fmt.Errorf("retrieving merge request commits: %v", err)
 				}
 
+				// Some merge requests have no commits, disregard these
+				if len(mergeRequestCommits) == 0 {
+					continue
+				}
+
 				// API is buggy, ordering is not respected, so we'll reorder by commit datestamp
 				sort.Slice(mergeRequestCommits, func(i, j int) bool {
 					return mergeRequestCommits[i].CommittedDate.Before(*mergeRequestCommits[j].CommittedDate)
