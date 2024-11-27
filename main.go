@@ -257,6 +257,10 @@ func performMigration(ctx context.Context, projects []Project) (int, error) {
 			defer wg.Done()
 
 			for proj := range queue {
+				if err := ctx.Err(); err != nil {
+					break
+				}
+
 				if err := migrateProject(ctx, proj); err != nil {
 					errCount++
 					logger.Error(err.Error())
@@ -266,6 +270,10 @@ func performMigration(ctx context.Context, projects []Project) (int, error) {
 	}
 
 	for _, proj := range projects {
+		if err := ctx.Err(); err != nil {
+			break
+		}
+
 		queue <- proj
 	}
 
