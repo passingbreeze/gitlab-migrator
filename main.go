@@ -843,7 +843,7 @@ func getGithubPullRequest(ctx context.Context, org, repo string, prNumber int) (
 	cacheToken := fmt.Sprintf("%s/%s/%d", org, repo, prNumber)
 	pullRequest := cache.getGithubPullRequest(cacheToken)
 	if pullRequest == nil {
-		logger.Debug("retrieving user details", "owner", org, "repo", repo, "pr_number", prNumber)
+		logger.Debug("retrieving pull request details", "owner", org, "repo", repo, "pr_number", prNumber)
 		pullRequest, _, err = gh.PullRequests.Get(ctx, org, repo, prNumber)
 		if err != nil {
 			return nil, fmt.Errorf("retrieving pull request: %v", err)
@@ -853,7 +853,7 @@ func getGithubPullRequest(ctx context.Context, org, repo string, prNumber int) (
 			return nil, fmt.Errorf("nil pull request was returned: %d", prNumber)
 		}
 
-		logger.Trace("caching GitHub user", "owner", org, "repo", repo, "pr_number", prNumber)
+		logger.Trace("caching pull request details", "owner", org, "repo", repo, "pr_number", prNumber)
 		cache.setGithubPullRequest(cacheToken, pullRequest)
 	}
 
