@@ -36,12 +36,12 @@ func (c objectCache) getGithubPullRequest(query string) *github.PullRequest {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
 	if v, ok := c.store[githubPullRequestCacheType][query]; ok {
-		return v.(*github.PullRequest)
+		return pointer(v.(github.PullRequest))
 	}
 	return nil
 }
 
-func (c objectCache) setGithubPullRequest(query string, result *github.PullRequest) {
+func (c objectCache) setGithubPullRequest(query string, result github.PullRequest) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	c.store[githubPullRequestCacheType][query] = result
@@ -51,12 +51,12 @@ func (c objectCache) getGithubSearchResults(query string) *github.IssuesSearchRe
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
 	if v, ok := c.store[githubSearchResultsCacheType][query]; ok {
-		return v.(*github.IssuesSearchResult)
+		return pointer(v.(github.IssuesSearchResult))
 	}
 	return nil
 }
 
-func (c objectCache) setGithubSearchResults(query string, result *github.IssuesSearchResult) {
+func (c objectCache) setGithubSearchResults(query string, result github.IssuesSearchResult) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	c.store[githubSearchResultsCacheType][query] = result
@@ -66,12 +66,12 @@ func (c objectCache) getGithubUser(username string) *github.User {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
 	if v, ok := c.store[gitlabUserCacheType][username]; ok {
-		return v.(*github.User)
+		return pointer(v.(github.User))
 	}
 	return nil
 }
 
-func (c objectCache) setGithubUser(username string, user *github.User) {
+func (c objectCache) setGithubUser(username string, user github.User) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	c.store[gitlabUserCacheType][username] = user
@@ -81,12 +81,12 @@ func (c objectCache) getGitlabUser(username string) *gitlab.User {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
 	if v, ok := c.store[githubUserCacheType][username]; ok {
-		return v.(*gitlab.User)
+		return pointer(v.(gitlab.User))
 	}
 	return nil
 }
 
-func (c objectCache) setGitlabUser(username string, user *gitlab.User) {
+func (c objectCache) setGitlabUser(username string, user gitlab.User) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	c.store[githubUserCacheType][username] = user
