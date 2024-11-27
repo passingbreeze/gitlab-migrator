@@ -334,6 +334,12 @@ func migrateProject(ctx context.Context, proj []string) error {
 		deleted = true
 	}
 
+	defaultBranch := "main"
+	if !renameMasterToMain && project.DefaultBranch != "" {
+		defaultBranch = project.DefaultBranch
+	}
+	logger.Trace("setting default branch", "owner", githubPath[0], "repo", githubPath[1], "default_branch", defaultBranch)
+
 	if deleted || err != nil {
 		var githubError *github.ErrorResponse
 		if err != nil && (!errors.As(err, &githubError) || githubError == nil || githubError.Response == nil || githubError.Response.StatusCode != http.StatusNotFound) {
@@ -346,11 +352,13 @@ func migrateProject(ctx context.Context, proj []string) error {
 			logger.Debug("repository not found on GitHub, proceeding to create", "owner", githubPath[0], "repo", githubPath[1])
 		}
 		newRepo := github.Repository{
-			Name:        pointer(githubPath[1]),
-			Private:     pointer(true),
-			HasIssues:   pointer(true),
-			HasProjects: pointer(true),
-			HasWiki:     pointer(true),
+			Name:          pointer(githubPath[1]),
+			Description:   &project.Description,
+			DefaultBranch: &defaultBranch,
+			Private:       pointer(true),
+			HasIssues:     pointer(true),
+			HasProjects:   pointer(true),
+			HasWiki:       pointer(true),
 		}
 		if _, _, err = gh.Repositories.Create(ctx, org, &newRepo); err != nil {
 			return fmt.Errorf("creating github repo: %v", err)
@@ -366,9 +374,6 @@ func migrateProject(ctx context.Context, proj []string) error {
 		AllowRebaseMerge:  pointer(true),
 		AllowSquashMerge:  pointer(true),
 		AllowUpdateBranch: pointer(true),
-	}
-	if org != "" {
-		updateRepo.AllowForking = pointer(true)
 	}
 	if _, _, err = gh.Repositories.Edit(ctx, githubPath[0], githubPath[1], &updateRepo); err != nil {
 		return fmt.Errorf("updating github repo: %v", err)
@@ -432,6 +437,14 @@ func migrateProject(ctx context.Context, proj []string) error {
 		} else {
 			return fmt.Errorf("pushing to github repo: %v", err)
 		}
+	}
+
+	logger.Debug("setting default repository branch", "owner", githubPath[0], "repo", githubPath[1], "branch_name", defaultBranch)
+	updateRepo = github.Repository{
+		DefaultBranch: &defaultBranch,
+	}
+	if _, _, err = gh.Repositories.Edit(ctx, githubPath[0], githubPath[1], &updateRepo); err != nil {
+		return fmt.Errorf("setting default branch: %v", err)
 	}
 
 	logger.Debug("retrieving GitLab merge requests", "name", gitlabPath[1], "group", gitlabPath[0], "project_id", project.ID)
@@ -672,7 +685,7 @@ func migrateProject(ctx context.Context, proj []string) error {
 %[3]s`, githubAuthorName, mergeRequest.IID, description, gitlabPath[0], gitlabPath[1], mergeRequest.CreatedAt.Format(dateFormat), closeDate, approval, originalState)
 
 		if pullRequest == nil {
-			logger.Debug("creating pull request", "repo", proj[1], "source", mergeRequest.SourceBranch, "target", mergeRequest.TargetBranch)
+			logger.Debug("creating pull request", "owner", githubPath[0], "repo", githubPath[1], "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch)
 			newPullRequest := github.NewPullRequest{
 				Title:               &mergeRequest.Title,
 				Head:                &mergeRequest.SourceBranch,
@@ -686,7 +699,7 @@ func migrateProject(ctx context.Context, proj []string) error {
 			}
 
 			if mergeRequest.State == "closed" || mergeRequest.State == "merged" {
-				logger.Debug("closing pull request", "repo", proj[1], "source", mergeRequest.SourceBranch, "target", mergeRequest.TargetBranch, "pull_request_id", pullRequest.GetNumber())
+				logger.Debug("closing pull request", "owner", githubPath[0], "repo", githubPath[1], "pull_request_id", pullRequest.GetNumber())
 
 				pullRequest.State = pointer("closed")
 				if pullRequest, _, err = gh.PullRequests.Edit(ctx, githubPath[0], githubPath[1], pullRequest.GetNumber(), pullRequest); err != nil {
@@ -694,9 +707,9 @@ func migrateProject(ctx context.Context, proj []string) error {
 				}
 			}
 
-		} else {
-			logger.Debug("updating pull request", "repo", proj[1], "source", mergeRequest.SourceBranch, "target", mergeRequest.TargetBranch, "pull_request_id", pullRequest.GetNumber())
-
+		} else if (pullRequest.Title == nil || *pullRequest.Title != mergeRequest.Title) ||
+			(pullRequest.Body == nil || *pullRequest.Body != body) ||
+			(pullRequest.Draft == nil || *pullRequest.Draft != mergeRequest.Draft) {
 			var newState *string
 			switch mergeRequest.State {
 			case "opened":
@@ -705,12 +718,18 @@ func migrateProject(ctx context.Context, proj []string) error {
 				newState = pointer("closed")
 			}
 
-			pullRequest.Title = &mergeRequest.Title
-			pullRequest.Body = &body
-			pullRequest.Draft = &mergeRequest.Draft
-			pullRequest.State = newState
-			if pullRequest, _, err = gh.PullRequests.Edit(ctx, githubPath[0], githubPath[1], pullRequest.GetNumber(), pullRequest); err != nil {
-				return fmt.Errorf("updating pull request: %v", err)
+			if newState != nil && (pullRequest.State == nil || *pullRequest.State != *newState) {
+				logger.Debug("updating pull request", "owner", githubPath[0], "repo", githubPath[1], "pull_request_id", pullRequest.GetNumber())
+
+				pullRequest.Title = &mergeRequest.Title
+				pullRequest.Body = &body
+				pullRequest.Draft = &mergeRequest.Draft
+				pullRequest.State = newState
+				if pullRequest, _, err = gh.PullRequests.Edit(ctx, githubPath[0], githubPath[1], pullRequest.GetNumber(), pullRequest); err != nil {
+					return fmt.Errorf("updating pull request: %v", err)
+				}
+			} else {
+				logger.Trace("existing pull request is up-to-date", "owner", githubPath[0], "repo", githubPath[1], "pull_request_id", pullRequest.GetNumber())
 			}
 		}
 
@@ -739,7 +758,7 @@ func migrateProject(ctx context.Context, proj []string) error {
 			return fmt.Errorf("listing merge request notes: %v", err)
 		}
 
-		logger.Debug("retrieving GitHub pull request comments", "repo", proj[1], "pull_request_id", pullRequest.GetNumber())
+		logger.Debug("retrieving GitHub pull request comments", "owner", githubPath[0], "repo", githubPath[1], "pull_request_id", pullRequest.GetNumber())
 		prComments, _, err := gh.Issues.ListComments(ctx, githubPath[0], githubPath[1], pullRequest.GetNumber(), &github.IssueListCommentsOptions{Sort: pointer("created"), Direction: pointer("asc")})
 		if err != nil {
 			return fmt.Errorf("listing pull request comments: %v", err)
@@ -775,24 +794,29 @@ func migrateProject(ctx context.Context, proj []string) error {
 
 %[4]s`, githubCommentAuthorName, comment.ID, comment.CreatedAt.Format("Mon, 2 Jan 2006"), comment.Body)
 
-			updated := false
+			foundExistingComment := false
 			for _, prComment := range prComments {
 				if prComment == nil {
 					continue
 				}
 
 				if strings.Contains(prComment.GetBody(), fmt.Sprintf("**Note ID** | %d", comment.ID)) {
-					logger.Debug("updating pull request comment", "repo", proj[1], "source", mergeRequest.SourceBranch, "target", mergeRequest.TargetBranch, "pr_number", pullRequest.GetNumber())
-					prComment.Body = &commentBody
-					if _, _, err = gh.Issues.EditComment(ctx, githubPath[0], githubPath[1], prComment.GetID(), prComment); err != nil {
-						return fmt.Errorf("updating pull request comments: %v", err)
+					foundExistingComment = true
+
+					if prComment.Body == nil || *prComment.Body != commentBody {
+						logger.Debug("updating pull request comment", "owner", githubPath[0], "repo", githubPath[1], "pr_number", pullRequest.GetNumber(), "comment_id", prComment.GetID())
+						prComment.Body = &commentBody
+						if _, _, err = gh.Issues.EditComment(ctx, githubPath[0], githubPath[1], prComment.GetID(), prComment); err != nil {
+							return fmt.Errorf("updating pull request comments: %v", err)
+						}
 					}
-					updated = true
+				} else {
+					logger.Trace("existing pull request comment is up-to-date", "owner", githubPath[0], "repo", githubPath[1], "pr_number", pullRequest.GetNumber(), "comment_id", prComment.GetID())
 				}
 			}
 
-			if !updated {
-				logger.Debug("creating pull request comment", "repo", proj[1], "source", mergeRequest.SourceBranch, "target", mergeRequest.TargetBranch, "pr_number", pullRequest.GetNumber())
+			if !foundExistingComment {
+				logger.Debug("creating pull request comment", "owner", githubPath[0], "repo", githubPath[1], "pr_number", pullRequest.GetNumber())
 				newComment := github.IssueComment{
 					Body: &commentBody,
 				}
@@ -811,7 +835,7 @@ func getGithubPullRequest(ctx context.Context, org, repo string, prNumber int) (
 	cacheToken := fmt.Sprintf("%s/%s/%d", org, repo, prNumber)
 	pullRequest := cache.getGithubPullRequest(cacheToken)
 	if pullRequest == nil {
-		logger.Debug("retrieving user details", "org", org, "repo", repo, "pr_number", prNumber)
+		logger.Debug("retrieving user details", "owner", org, "repo", repo, "pr_number", prNumber)
 		pullRequest, _, err = gh.PullRequests.Get(ctx, org, repo, prNumber)
 		if err != nil {
 			return nil, fmt.Errorf("retrieving pull request: %v", err)
@@ -821,7 +845,7 @@ func getGithubPullRequest(ctx context.Context, org, repo string, prNumber int) (
 			return nil, fmt.Errorf("nil pull request was returned: %d", prNumber)
 		}
 
-		logger.Trace("caching GitHub user", "org", org, "repo", repo, "pr_number", prNumber)
+		logger.Trace("caching GitHub user", "owner", org, "repo", repo, "pr_number", prNumber)
 		cache.setGithubPullRequest(cacheToken, pullRequest)
 	}
 
