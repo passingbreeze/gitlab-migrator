@@ -119,7 +119,7 @@ func main() {
 
 	retryClient := retryablehttp.NewClient()
 	retryClient.Logger = nil
-	retryClient.RetryMax = 8
+	retryClient.RetryMax = 32
 	retryClient.RetryWaitMin = 30 * time.Second
 	retryClient.RetryWaitMax = 120 * time.Second
 
