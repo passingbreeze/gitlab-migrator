@@ -36,7 +36,7 @@ const (
 	defaultGitlabDomain = "gitlab.com"
 )
 
-var deleteExistingRepos, renameMasterToMain bool
+var deleteExistingRepos, enablePullRequests, renameMasterToMain bool
 var githubDomain, githubRepo, githubToken, githubUser, gitlabDomain, gitlabProject, gitlabToken, projectsCsvPath string
 
 var (
@@ -89,6 +89,7 @@ func main() {
 	}
 
 	flag.BoolVar(&deleteExistingRepos, "delete-existing-repos", false, "whether existing repositories should be deleted before migrating (defaults to: false)")
+	flag.BoolVar(&enablePullRequests, "migrate-pull-requests", false, "whether pull requests should be migrated (defaults to: false)")
 	flag.BoolVar(&renameMasterToMain, "rename-master-to-main", false, "rename master branch to main and update pull requests (defaults to: false)")
 
 	flag.StringVar(&githubDomain, "github-domain", defaultGithubDomain, "specifies the GitHub domain to use")
@@ -455,6 +456,16 @@ func migrateProject(ctx context.Context, proj []string) error {
 		return fmt.Errorf("setting default branch: %v", err)
 	}
 
+	if enablePullRequests {
+		if err = migratePullRequests(ctx, githubPath, gitlabPath, project, repo); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func migratePullRequests(ctx context.Context, githubPath, gitlabPath []string, project *gitlab.Project, repo *git.Repository) error {
 	logger.Debug("retrieving GitLab merge requests", "name", gitlabPath[1], "group", gitlabPath[0], "project_id", project.ID)
 	mergeRequests, _, err := gl.MergeRequests.ListProjectMergeRequests(project.ID, &gitlab.ListProjectMergeRequestsOptions{OrderBy: pointer("created_at"), Sort: pointer("asc")})
 	if err != nil {
@@ -470,7 +481,7 @@ func migrateProject(ctx context.Context, proj []string) error {
 		var cleanUpBranch bool
 		var pullRequest *github.PullRequest
 
-		logger.Debug("searching for any existing pull request", "repo", proj[1], "merge_request_id", mergeRequest.IID)
+		logger.Debug("searching for any existing pull request", "owner", githubPath[0], "repo", githubPath[1], "merge_request_id", mergeRequest.IID)
 		//query := fmt.Sprintf("repo:%s/%s is:pr head:%s", githubPath[0], githubPath[1], mergeRequest.SourceBranch)
 		query := fmt.Sprintf("repo:%s/%s is:pr", githubPath[0], githubPath[1])
 		searchResult, err := getGithubSearchResults(ctx, query)
@@ -499,7 +510,7 @@ func migrateProject(ctx context.Context, proj []string) error {
 					}
 
 					if strings.Contains(pr.GetBody(), fmt.Sprintf("**GitLab MR Number** | %d", mergeRequest.IID)) {
-						logger.Debug("found existing pull request", "repo", proj[1], "pull_request_id", pr.GetID())
+						logger.Debug("found existing pull request", "owner", githubPath[0], "repo", githubPath[1], "pull_request_id", pr.GetID())
 						pullRequest = pr
 					}
 				}
@@ -593,7 +604,7 @@ func migrateProject(ctx context.Context, proj []string) error {
 					return fmt.Errorf("checking out temporary source branch: %v", err)
 				}
 
-				logger.Debug("pushing branches for merged/closed merge request", "repo", proj[1], "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch)
+				logger.Debug("pushing branches for merged/closed merge request", "owner", githubPath[0], "repo", githubPath[1], "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch)
 				if err = repo.PushContext(ctx, &git.PushOptions{
 					RemoteName: "github",
 					RefSpecs: []config.RefSpec{
@@ -604,7 +615,7 @@ func migrateProject(ctx context.Context, proj []string) error {
 				}); err != nil {
 					upToDateError := errors.New("already up-to-date")
 					if errors.As(err, &upToDateError) {
-						logger.Debug("branch already exists and is up-to-date on GitHub", "repo", proj[1], "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch)
+						logger.Trace("branch already exists and is up-to-date on GitHub", "owner", githubPath[0], "repo", githubPath[1], "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch)
 					} else {
 						return fmt.Errorf("pushing temporary branches to github: %v", err)
 					}
@@ -742,7 +753,7 @@ func migrateProject(ctx context.Context, proj []string) error {
 		}
 
 		if cleanUpBranch {
-			logger.Debug("deleting temporary branches for closed pull request", "repo", proj[1], "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch, "pull_request_id", pullRequest.GetNumber())
+			logger.Debug("deleting temporary branches for closed pull request", "owner", githubPath[0], "repo", githubPath[1], "pull_request_id", pullRequest.GetNumber(), "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch)
 			if err = repo.PushContext(ctx, &git.PushOptions{
 				RemoteName: "github",
 				RefSpecs: []config.RefSpec{
@@ -753,7 +764,7 @@ func migrateProject(ctx context.Context, proj []string) error {
 			}); err != nil {
 				upToDateError := errors.New("already up-to-date")
 				if errors.As(err, &upToDateError) {
-					logger.Debug("branches already deleted on GitHub", "repo", proj[1], "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch)
+					logger.Trace("branches already deleted on GitHub", "owner", githubPath[0], "repo", githubPath[1], "pull_request_id", pullRequest.GetNumber(), "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch)
 				} else {
 					return fmt.Errorf("pushing branch deletions to github: %v", err)
 				}
