@@ -316,7 +316,7 @@ func migrateProject(ctx context.Context, proj []string) error {
 		return fmt.Errorf("parsing clone URL: %v", err)
 	}
 
-	logger.Info("mirroring repository from GitLab to GitHub", "name", gitlabPath[1], "group", gitlabPath[0])
+	logger.Info("mirroring repository from GitLab to GitHub", "name", gitlabPath[1], "group", gitlabPath[0], "github_org", githubPath[0], "github_repo", githubPath[1])
 
 	user, err := getGithubUser(ctx, githubPath[0])
 	if err != nil {
@@ -333,29 +333,31 @@ func migrateProject(ctx context.Context, proj []string) error {
 	logger.Debug("checking for existing repository on GitHub", "owner", githubPath[0], "repo", githubPath[1])
 	_, _, err = gh.Repositories.Get(ctx, githubPath[0], githubPath[1])
 
-	deleted := false
-	if err == nil && deleteExistingRepos {
+	var githubError *github.ErrorResponse
+	if err != nil && (!errors.As(err, &githubError) || githubError == nil || githubError.Response == nil || githubError.Response.StatusCode != http.StatusNotFound) {
+		return fmt.Errorf("retrieving github repo: %v", err)
+	}
+
+	var createRepo, repoDeleted bool
+	if err != nil {
+		createRepo = true
+	} else if deleteExistingRepos {
 		logger.Warn("existing repository was found on GitHub, proceeding to delete", "owner", githubPath[0], "repo", githubPath[1])
-		if _, err := gh.Repositories.Delete(ctx, githubPath[0], githubPath[1]); err != nil {
+		if _, err = gh.Repositories.Delete(ctx, githubPath[0], githubPath[1]); err != nil {
 			return fmt.Errorf("deleting existing github repo: %v", err)
 		}
 
-		deleted = true
+		createRepo = true
+		repoDeleted = true
 	}
 
 	defaultBranch := "main"
 	if !renameMasterToMain && project.DefaultBranch != "" {
 		defaultBranch = project.DefaultBranch
 	}
-	logger.Trace("setting default branch", "owner", githubPath[0], "repo", githubPath[1], "default_branch", defaultBranch)
 
-	if deleted || err != nil {
-		var githubError *github.ErrorResponse
-		if err != nil && (!errors.As(err, &githubError) || githubError == nil || githubError.Response == nil || githubError.Response.StatusCode != http.StatusNotFound) {
-			return fmt.Errorf("retrieving github repo: %v", err)
-		}
-
-		if deleted {
+	if createRepo {
+		if repoDeleted {
 			logger.Warn("recreating GitHub repository", "owner", githubPath[0], "repo", githubPath[1])
 		} else {
 			logger.Debug("repository not found on GitHub, proceeding to create", "owner", githubPath[0], "repo", githubPath[1])
