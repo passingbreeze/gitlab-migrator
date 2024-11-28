@@ -4,6 +4,7 @@ This tool can migrate projects from GitLab to repositories on GitHub. It current
 
 * migrating the git repository with full history
 * migrating merge requests and translating them into pull requests, including closed/merged ones
+* renaming the `master` branch to `main` along the way
 
 It does not support migrating issues, wikis or any other primitive at this time. PRs welcome!
 
@@ -22,7 +23,7 @@ Golang 1.23 was used, you may have luck with earlier releases.
 _Example Usage_
 
 ```
-gitlab-migrator -github-user=mytokenuser -gitlab-project=mygitlabuser/myproject -github-repo=mygithubuser/myrepo
+gitlab-migrator -github-user=mytokenuser -gitlab-project=mygitlabuser/myproject -github-repo=mygithubuser/myrepo -migrate-pull-requests
 ```
 
 Written in Go, this is a cross-platform CLI utility that accepts the following runtime arguments:
@@ -42,6 +43,8 @@ Written in Go, this is a cross-platform CLI utility that accepts the following r
     	the GitLab project to migrate
   -max-concurrency int
     	how many projects to migrate in parallel (default 4)
+  -migrate-pull-requests
+    	whether pull requests should be migrated (defaults to: false)
   -projects-csv string
     	specifies the path to a CSV file describing projects to migrate (incompatible with -gitlab-project and -github-project)
   -rename-master-to-main
@@ -60,7 +63,9 @@ gitlab-group/gitlab-project-name,github-org-or-user/github-repo-name
 
 For authentication, the `GITLAB_TOKEN` and `GITHUB_TOKEN` environment variables must be populated. You cannot specify tokens as command-line arguments.
 
-To delete existing GitHub repos prior to migrating, pass the `-delete-existing-repos` argument. This is dangerous, you won't be asked for confirmation.
+To enable migration of GitLab merge requests to GitHub pull requests (including closed/merged ones!), specify `-migrate-pull-requests`.
+
+To delete existing GitHub repos prior to migrating, pass the `-delete-existing-repos` argument. _This is potentially dangerous, you won't be asked for confirmation._
 
 Note: If the destination repository does not exist, this tool will attempt to create a private repository. If the destination repo already exists, it will be used unless you specify `-delete-existing-repos`
 
@@ -68,7 +73,7 @@ Specify the location of a self-hosted instance of GitLab with the `-gitlab-domai
 
 As a bonus, this tool can transparently rename the `master` branch on your GitLab repository, to `main` on the migrated GitHub repository - enable with the `-rename-master-to-main` argument.
 
-By default, 4 workers will be spawned to migrate up to 4 projects in parallel. You can increase or decrease this with the `-max-concurrency` argument.
+By default, 4 workers will be spawned to migrate up to 4 projects in parallel. You can increase or decrease this with the `-max-concurrency` argument. Note that due to GitHub API rate-limiting, you may not experience any significant speed-up. See [GitHub API docs](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api) for details.
 
 ## Logging
 
@@ -77,6 +82,8 @@ This tool is entirely noninteractive and outputs different levels of logs depend
 ## Idempotence
 
 This tool tries to be idempotent. You can run it over and over and it will patch the GitHub repository, along with its pull requests, to match what you have in GitLab. This should help you migrate a number of projects without enacting a large maintenance window.
+
+_Note that this tool performs a forced mirror push, so it's not recommended to run this tool after commencing work in the target repository._
 
 For pull requests and their comments, the corresponding IDs from GitLab are added to the Markdown header, this is parsed to enable idempotence (see next section).
 
