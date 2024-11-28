@@ -30,25 +30,25 @@ Written in Go, this is a cross-platform CLI utility that accepts the following r
 
 ```
   -delete-existing-repos
-    	whether existing repositories should be deleted before migrating (defaults to: false)
+        whether existing repositories should be deleted before migrating (defaults to: false)
   -github-domain string
-    	specifies the GitHub domain to use (default "github.com")
+        specifies the GitHub domain to use (default "github.com")
   -github-repo string
-    	the GitHub repository to migrate to
+        the GitHub repository to migrate to
   -github-user string
-    	specifies the GitHub user to use, who will author any migrated PRs (required)
+        specifies the GitHub user to use, who will author any migrated PRs (required)
   -gitlab-domain string
-    	specifies the GitLab domain to use (default "gitlab.com")
+        specifies the GitLab domain to use (default "gitlab.com")
   -gitlab-project string
-    	the GitLab project to migrate
+        the GitLab project to migrate
   -max-concurrency int
-    	how many projects to migrate in parallel (default 4)
+        how many projects to migrate in parallel (default 4)
   -migrate-pull-requests
-    	whether pull requests should be migrated (defaults to: false)
+        whether pull requests should be migrated (defaults to: false)
   -projects-csv string
-    	specifies the path to a CSV file describing projects to migrate (incompatible with -gitlab-project and -github-project)
+        specifies the path to a CSV file describing projects to migrate (incompatible with -gitlab-project and -github-repo)
   -rename-master-to-main
-    	rename master branch to main and update pull requests (defaults to: false)
+        rename master branch to main and update pull requests (defaults to: false)
 ```
 
 Use the `-github-user` argument to specify the GitHub username for whom the authentication token was issued (mandatory).
