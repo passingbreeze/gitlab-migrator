@@ -409,15 +409,15 @@ func migrateProject(ctx context.Context, proj []string) error {
 
 	if renameMasterToMain {
 		if masterBranch, err := repo.Reference(plumbing.NewBranchReferenceName("master"), false); err == nil {
-			logger.Info("renaming master branch to main prior to push", "repo", proj[1], "sha", masterBranch.Hash())
+			logger.Info("renaming master branch to main prior to push", "name", gitlabPath[1], "group", gitlabPath[0], "sha", masterBranch.Hash())
 
-			logger.Debug("creating main branch", "repo", proj[1], "sha", masterBranch.Hash())
+			logger.Debug("creating main branch", "name", gitlabPath[1], "group", gitlabPath[0], "sha", masterBranch.Hash())
 			mainBranch := plumbing.NewHashReference(plumbing.NewBranchReferenceName("main"), masterBranch.Hash())
 			if err = repo.Storer.SetReference(mainBranch); err != nil {
 				return fmt.Errorf("creating main branch: %v", err)
 			}
 
-			logger.Debug("deleting master branch", "repo", proj[1], "sha", masterBranch.Hash())
+			logger.Debug("deleting master branch", "name", gitlabPath[1], "group", gitlabPath[0], "sha", masterBranch.Hash())
 			if err = repo.Storer.RemoveReference(masterBranch.Name()); err != nil {
 				return fmt.Errorf("deleting master branch: %v", err)
 			}
@@ -468,10 +468,27 @@ func migrateProject(ctx context.Context, proj []string) error {
 }
 
 func migratePullRequests(ctx context.Context, githubPath, gitlabPath []string, project *gitlab.Project, repo *git.Repository) error {
+	var mergeRequests []*gitlab.MergeRequest
+
+	opts := &gitlab.ListProjectMergeRequestsOptions{
+		OrderBy: pointer("created_at"),
+		Sort:    pointer("asc"),
+	}
+
 	logger.Debug("retrieving GitLab merge requests", "name", gitlabPath[1], "group", gitlabPath[0], "project_id", project.ID)
-	mergeRequests, _, err := gl.MergeRequests.ListProjectMergeRequests(project.ID, &gitlab.ListProjectMergeRequestsOptions{OrderBy: pointer("created_at"), Sort: pointer("asc")})
-	if err != nil {
-		return fmt.Errorf("retrieving gitlab merge requests: %v", err)
+	for {
+		result, resp, err := gl.MergeRequests.ListProjectMergeRequests(project.ID, opts)
+		if err != nil {
+			return fmt.Errorf("retrieving gitlab merge requests: %v", err)
+		}
+
+		mergeRequests = append(mergeRequests, result...)
+
+		if resp.NextPage == 0 {
+			break
+		}
+
+		opts.Page = resp.NextPage
 	}
 
 	logger.Info("migrating merge requests from GitLab to GitHub", "name", gitlabPath[1], "group", gitlabPath[0])
@@ -650,7 +667,7 @@ func migratePullRequests(ctx context.Context, githubPath, gitlabPath []string, p
 
 		logger.Debug("determining merge request approvers", "name", gitlabPath[1], "group", gitlabPath[0], "project_id", project.ID, "merge_request_id", mergeRequest.IID)
 		approvers := make([]string, 0)
-		awards, _, err := gl.AwardEmoji.ListMergeRequestAwardEmoji(project.ID, mergeRequest.IID, nil)
+		awards, _, err := gl.AwardEmoji.ListMergeRequestAwardEmoji(project.ID, mergeRequest.IID, &gitlab.ListAwardEmojiOptions{PerPage: 100})
 		if err != nil {
 			return fmt.Errorf("listing merge request awards: %v", err)
 		}
@@ -773,10 +790,26 @@ func migratePullRequests(ctx context.Context, githubPath, gitlabPath []string, p
 			}
 		}
 
+		var comments []*gitlab.Note
+		opts := &gitlab.ListMergeRequestNotesOptions{
+			OrderBy: pointer("created_at"),
+			Sort:    pointer("asc"),
+		}
+
 		logger.Debug("retrieving GitLab merge request comments", "name", gitlabPath[1], "group", gitlabPath[0], "project_id", project.ID, "merge_request_id", mergeRequest.IID)
-		comments, _, err := gl.Notes.ListMergeRequestNotes(project.ID, mergeRequest.IID, &gitlab.ListMergeRequestNotesOptions{OrderBy: pointer("created_at"), Sort: pointer("asc")})
-		if err != nil {
-			return fmt.Errorf("listing merge request notes: %v", err)
+		for {
+			result, resp, err := gl.Notes.ListMergeRequestNotes(project.ID, mergeRequest.IID, opts)
+			if err != nil {
+				return fmt.Errorf("listing merge request notes: %v", err)
+			}
+
+			comments = append(comments, result...)
+
+			if resp.NextPage == 0 {
+				break
+			}
+
+			opts.Page = resp.NextPage
 		}
 
 		logger.Debug("retrieving GitHub pull request comments", "owner", githubPath[0], "repo", githubPath[1], "pull_request_id", pullRequest.GetNumber())
