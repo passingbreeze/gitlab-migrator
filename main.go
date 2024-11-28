@@ -24,7 +24,9 @@ import (
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/go-git/go-git/v5/storage/memory"
+	"github.com/gofri/go-github-pagination/githubpagination"
 	"github.com/google/go-github/v66/github"
+	"github.com/hashicorp/go-cleanhttp"
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/go-retryablehttp"
 	"github.com/xanzy/go-gitlab"
@@ -41,7 +43,6 @@ var githubDomain, githubRepo, githubToken, githubUser, gitlabDomain, gitlabProje
 
 var (
 	cache          *objectCache
-	client         *http.Client
 	logger         hclog.Logger
 	gh             *github.Client
 	gl             *gitlab.Client
@@ -118,11 +119,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	retryClient := retryablehttp.NewClient()
-	retryClient.Logger = nil
-	retryClient.RetryMax = 32
-	retryClient.RetryWaitMin = 30 * time.Second
-	retryClient.RetryWaitMax = 120 * time.Second
+	retryClient := &retryablehttp.Client{
+		HTTPClient:   cleanhttp.DefaultPooledClient(),
+		Logger:       nil,
+		RetryMax:     32,
+		RetryWaitMin: 30 * time.Second,
+		RetryWaitMax: 120 * time.Second,
+	}
 
 	retryClient.Backoff = func(min, max time.Duration, attemptNum int, resp *http.Response) time.Duration {
 		if resp != nil {
@@ -193,7 +196,7 @@ func main() {
 		return false, nil
 	}
 
-	client = retryClient.StandardClient()
+	client := githubpagination.NewClient(&retryablehttp.RoundTripper{Client: retryClient}, githubpagination.WithPerPage(100))
 
 	if githubDomain == defaultGithubDomain {
 		gh = github.NewClient(client).WithAuthToken(githubToken)
