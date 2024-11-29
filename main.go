@@ -532,7 +532,7 @@ func migratePullRequests(ctx context.Context, githubPath, gitlabPath []string, p
 					}
 
 					if strings.Contains(pr.GetBody(), fmt.Sprintf("**GitLab MR Number** | %d", mergeRequest.IID)) {
-						logger.Debug("found existing pull request", "owner", githubPath[0], "repo", githubPath[1], "pull_request_id", pr.GetID())
+						logger.Debug("found existing pull request", "owner", githubPath[0], "repo", githubPath[1], "pr_number", pr.GetNumber())
 						pullRequest = pr
 					}
 				}
@@ -740,7 +740,7 @@ func migratePullRequests(ctx context.Context, githubPath, gitlabPath []string, p
 			}
 
 			if mergeRequest.State == "closed" || mergeRequest.State == "merged" {
-				logger.Debug("closing pull request", "owner", githubPath[0], "repo", githubPath[1], "pull_request_id", pullRequest.GetNumber())
+				logger.Debug("closing pull request", "owner", githubPath[0], "repo", githubPath[1], "pr_number", pullRequest.GetNumber())
 
 				pullRequest.State = pointer("closed")
 				if pullRequest, _, err = gh.PullRequests.Edit(ctx, githubPath[0], githubPath[1], pullRequest.GetNumber(), pullRequest); err != nil {
@@ -760,7 +760,7 @@ func migratePullRequests(ctx context.Context, githubPath, gitlabPath []string, p
 			}
 
 			if newState != nil && (pullRequest.State == nil || *pullRequest.State != *newState) {
-				logger.Debug("updating pull request", "owner", githubPath[0], "repo", githubPath[1], "pull_request_id", pullRequest.GetNumber())
+				logger.Debug("updating pull request", "owner", githubPath[0], "repo", githubPath[1], "pr_number", pullRequest.GetNumber())
 
 				pullRequest.Title = &mergeRequest.Title
 				pullRequest.Body = &body
@@ -770,12 +770,12 @@ func migratePullRequests(ctx context.Context, githubPath, gitlabPath []string, p
 					return fmt.Errorf("updating pull request: %v", err)
 				}
 			} else {
-				logger.Trace("existing pull request is up-to-date", "owner", githubPath[0], "repo", githubPath[1], "pull_request_id", pullRequest.GetNumber())
+				logger.Trace("existing pull request is up-to-date", "owner", githubPath[0], "repo", githubPath[1], "pr_number", pullRequest.GetNumber())
 			}
 		}
 
 		if cleanUpBranch {
-			logger.Debug("deleting temporary branches for closed pull request", "owner", githubPath[0], "repo", githubPath[1], "pull_request_id", pullRequest.GetNumber(), "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch)
+			logger.Debug("deleting temporary branches for closed pull request", "owner", githubPath[0], "repo", githubPath[1], "pr_number", pullRequest.GetNumber(), "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch)
 			if err = repo.PushContext(ctx, &git.PushOptions{
 				RemoteName: "github",
 				RefSpecs: []config.RefSpec{
@@ -786,7 +786,7 @@ func migratePullRequests(ctx context.Context, githubPath, gitlabPath []string, p
 			}); err != nil {
 				upToDateError := errors.New("already up-to-date")
 				if errors.As(err, &upToDateError) {
-					logger.Trace("branches already deleted on GitHub", "owner", githubPath[0], "repo", githubPath[1], "pull_request_id", pullRequest.GetNumber(), "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch)
+					logger.Trace("branches already deleted on GitHub", "owner", githubPath[0], "repo", githubPath[1], "pr_number", pullRequest.GetNumber(), "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch)
 				} else {
 					return fmt.Errorf("pushing branch deletions to github: %v", err)
 				}
@@ -815,7 +815,7 @@ func migratePullRequests(ctx context.Context, githubPath, gitlabPath []string, p
 			opts.Page = resp.NextPage
 		}
 
-		logger.Debug("retrieving GitHub pull request comments", "owner", githubPath[0], "repo", githubPath[1], "pull_request_id", pullRequest.GetNumber())
+		logger.Debug("retrieving GitHub pull request comments", "owner", githubPath[0], "repo", githubPath[1], "pr_number", pullRequest.GetNumber())
 		prComments, _, err := gh.Issues.ListComments(ctx, githubPath[0], githubPath[1], pullRequest.GetNumber(), &github.IssueListCommentsOptions{Sort: pointer("created"), Direction: pointer("asc")})
 		if err != nil {
 			return fmt.Errorf("listing pull request comments: %v", err)
