@@ -79,6 +79,15 @@ By default, 4 workers will be spawned to migrate up to 4 projects in parallel. Y
 
 This tool is entirely noninteractive and outputs different levels of logs depending on your interest. You can set the `LOG_LEVEL` environment to one of `ERROR`, `WARN`, `INFO`, `DEBUG` or `TRACE` to get more or less verbosity. The default is `INFO`.
 
+## Caching
+
+The tool maintains a thread-safe in-memory cache for certain primitives, in order to help reduce the number of API requests being made. At this time, the following are cached the first time they are encountered, and thereafter retrieved from the cache until the tool is restarted:
+
+- GitHub pull requests
+- GitHub issue search results
+- GitHub user profiles
+- GitLab user profiles
+
 ## Idempotence
 
 This tool tries to be idempotent. You can run it over and over and it will patch the GitHub repository, along with its pull requests, to match what you have in GitLab. This should help you migrate a number of projects without enacting a large maintenance window.
