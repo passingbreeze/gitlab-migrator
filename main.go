@@ -363,6 +363,8 @@ func migrateProject(ctx context.Context, proj []string) error {
 		defaultBranch = project.DefaultBranch
 	}
 
+	homepage := fmt.Sprintf("https://%s/%s/%s", gitlabDomain, gitlabPath[0], gitlabPath[1])
+
 	if createRepo {
 		if repoDeleted {
 			logger.Warn("recreating GitHub repository", "owner", githubPath[0], "repo", githubPath[1])
@@ -372,6 +374,7 @@ func migrateProject(ctx context.Context, proj []string) error {
 		newRepo := github.Repository{
 			Name:          pointer(githubPath[1]),
 			Description:   &project.Description,
+			Homepage:      &homepage,
 			DefaultBranch: &defaultBranch,
 			Private:       pointer(true),
 			HasIssues:     pointer(true),
@@ -387,6 +390,7 @@ func migrateProject(ctx context.Context, proj []string) error {
 	updateRepo := github.Repository{
 		Name:              pointer(githubPath[1]),
 		Description:       &project.Description,
+		Homepage:          &homepage,
 		AllowAutoMerge:    pointer(true),
 		AllowMergeCommit:  pointer(true),
 		AllowRebaseMerge:  pointer(true),
