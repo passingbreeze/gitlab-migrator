@@ -578,7 +578,8 @@ func migratePullRequests(ctx context.Context, errs chan<- error, githubPath, git
 						break
 					}
 
-					if strings.Contains(pr.GetBody(), fmt.Sprintf("**GitLab MR Number** | %d", mergeRequest.IID)) {
+					if strings.Contains(pr.GetBody(), fmt.Sprintf("**GitLab MR Number** | %d", mergeRequest.IID)) ||
+						strings.Contains(pr.GetBody(), fmt.Sprintf("**GitLab MR Number** | [%d]", mergeRequest.IID)) {
 						logger.Debug("found existing pull request", "owner", githubPath[0], "repo", githubPath[1], "pr_number", pr.GetNumber())
 						pullRequest = pr
 					}
@@ -822,14 +823,20 @@ func migratePullRequests(ctx context.Context, errs chan<- error, githubPath, git
 			closeDate = fmt.Sprintf("\n> | **Date Originally Merged** | %s |", mergeRequest.MergedAt.Format(dateFormat))
 		}
 
+		mergeRequestTitle := mergeRequest.Title
+		if len(mergeRequestTitle) > 40 {
+			mergeRequestTitle = mergeRequestTitle[:40] + "..."
+		}
+
 		body := fmt.Sprintf(`> [!NOTE]
 > This pull request was migrated from GitLab
 >
 > |      |      |
 > | ---- | ---- |
 > | **Original Author** | %[1]s |
-> | **GitLab Project** | %[4]s/%[5]s |
-> | **GitLab MR Number** | %[2]d |
+> | **GitLab Project** | [%[4]s/%[5]s](https://%[10]s/%[4]s/%[5]s) |
+> | **GitLab Merge Request** | [%[11]s](https://%[10]s/%[4]s/%[5]s/merge_requests/%[2]d) |
+> | **GitLab MR Number** | [%[2]d](https://%[10]s/%[4]s/%[5]s/merge_requests/%[2]d) |
 > | **Date Originally Opened** | %[6]s |%[7]s
 > | **Approved on GitLab by** | %[8]s |
 > |      |      |
@@ -838,7 +845,7 @@ func migratePullRequests(ctx context.Context, errs chan<- error, githubPath, git
 
 ## Original Description
 
-%[3]s`, githubAuthorName, mergeRequest.IID, description, gitlabPath[0], gitlabPath[1], mergeRequest.CreatedAt.Format(dateFormat), closeDate, approval, originalState)
+%[3]s`, githubAuthorName, mergeRequest.IID, description, gitlabPath[0], gitlabPath[1], mergeRequest.CreatedAt.Format(dateFormat), closeDate, approval, originalState, gitlabDomain, mergeRequestTitle)
 
 		if pullRequest == nil {
 			logger.Debug("creating pull request", "owner", githubPath[0], "repo", githubPath[1], "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch)
@@ -873,9 +880,7 @@ func migratePullRequests(ctx context.Context, errs chan<- error, githubPath, git
 				}
 			}
 
-		} else if (pullRequest.Title == nil || *pullRequest.Title != mergeRequest.Title) ||
-			(pullRequest.Body == nil || *pullRequest.Body != body) ||
-			(pullRequest.Draft == nil || *pullRequest.Draft != mergeRequest.Draft) {
+		} else {
 			var newState *string
 			switch mergeRequest.State {
 			case "opened":
@@ -884,7 +889,10 @@ func migratePullRequests(ctx context.Context, errs chan<- error, githubPath, git
 				newState = pointer("closed")
 			}
 
-			if newState != nil && (pullRequest.State == nil || *pullRequest.State != *newState) {
+			if (newState != nil && (pullRequest.State == nil || *pullRequest.State != *newState)) ||
+				(pullRequest.Title == nil || *pullRequest.Title != mergeRequest.Title) ||
+				(pullRequest.Body == nil || *pullRequest.Body != body) ||
+				(pullRequest.Draft == nil || *pullRequest.Draft != mergeRequest.Draft) {
 				logger.Debug("updating pull request", "owner", githubPath[0], "repo", githubPath[1], "pr_number", pullRequest.GetNumber())
 
 				pullRequest.Title = &mergeRequest.Title
