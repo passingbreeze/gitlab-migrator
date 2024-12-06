@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/csv"
 	"errors"
@@ -220,13 +221,16 @@ func main() {
 
 	projects := make([]Project, 0)
 	if projectsCsvPath != "" {
-		csvFile, err := os.Open(projectsCsvPath)
+		data, err := os.ReadFile(projectsCsvPath)
 		if err != nil {
 			logger.Error(err.Error())
 			os.Exit(1)
 		}
 
-		if projects, err = csv.NewReader(csvFile).ReadAll(); err != nil {
+		// Trim a UTF-8 BOM, if present
+		data = bytes.TrimPrefix(data, []byte("\xef\xbb\xbf"))
+
+		if projects, err = csv.NewReader(bytes.NewBuffer(data)).ReadAll(); err != nil {
 			logger.Error(err.Error())
 			os.Exit(1)
 		}
