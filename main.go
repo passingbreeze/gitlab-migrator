@@ -44,6 +44,7 @@ var githubDomain, githubRepo, githubToken, githubUser, gitlabDomain, gitlabProje
 
 var (
 	cache          *objectCache
+	errCount       int
 	logger         hclog.Logger
 	gh             *github.Client
 	gl             *gitlab.Client
@@ -255,7 +256,6 @@ func performMigration(ctx context.Context, projects []Project) (int, error) {
 	logger.Info(fmt.Sprintf("processing %d project(s) with %d workers", len(projects), concurrency))
 
 	var wg sync.WaitGroup
-	var errCount int
 	queue := make(chan Project, concurrency*2)
 
 	for i := 0; i < concurrency; i++ {
@@ -471,6 +471,7 @@ func migrateProject(ctx context.Context, proj []string) error {
 			select {
 			case err = <-errLog:
 				if err != nil {
+					errCount++
 					logger.Error(err.Error())
 				}
 			}
@@ -483,6 +484,17 @@ func migrateProject(ctx context.Context, proj []string) error {
 
 func migratePullRequests(ctx context.Context, errs chan<- error, githubPath, gitlabPath []string, project *gitlab.Project, repo *git.Repository) {
 	defer close(errs)
+
+	sendErr := func(err error) bool {
+		select {
+		case errs <- err:
+			return true
+		case <-time.After(2500 * time.Millisecond):
+			errCount++
+			return false
+		}
+	}
+
 	var mergeRequests []*gitlab.MergeRequest
 
 	opts := &gitlab.ListProjectMergeRequestsOptions{
@@ -494,7 +506,11 @@ func migratePullRequests(ctx context.Context, errs chan<- error, githubPath, git
 	for {
 		result, resp, err := gl.MergeRequests.ListProjectMergeRequests(project.ID, opts)
 		if err != nil {
-			errs <- fmt.Errorf("retrieving gitlab merge requests: %v", err)
+			err = fmt.Errorf("retrieving gitlab merge requests: %v", err)
+			if !sendErr(err) {
+				logger.Error(err.Error())
+				return
+			}
 			return
 		}
 
@@ -521,7 +537,11 @@ func migratePullRequests(ctx context.Context, errs chan<- error, githubPath, git
 		query := fmt.Sprintf("repo:%s/%s is:pr", githubPath[0], githubPath[1])
 		searchResult, err := getGithubSearchResults(ctx, query)
 		if err != nil {
-			errs <- fmt.Errorf("listing pull requests: %v", err)
+			err = fmt.Errorf("listing pull requests: %v", err)
+			if !sendErr(err) {
+				logger.Error(err.Error())
+				return
+			}
 			continue
 		}
 
@@ -536,7 +556,11 @@ func migratePullRequests(ctx context.Context, errs chan<- error, githubPath, git
 				// Extract the PR number from the URL
 				prUrl, err := url.Parse(*issue.PullRequestLinks.URL)
 				if err != nil {
-					errs <- fmt.Errorf("parsing pull request url: %v", err)
+					err = fmt.Errorf("parsing pull request url: %v", err)
+					if !sendErr(err) {
+						logger.Error(err.Error())
+						return
+					}
 					skip = true
 					break
 				}
@@ -545,7 +569,11 @@ func migratePullRequests(ctx context.Context, errs chan<- error, githubPath, git
 					prNumber, _ := strconv.Atoi(m[1])
 					pr, err := getGithubPullRequest(ctx, githubPath[0], githubPath[1], prNumber)
 					if err != nil {
-						errs <- fmt.Errorf("retrieving pull request: %v", err)
+						err = fmt.Errorf("retrieving pull request: %v", err)
+						if !sendErr(err) {
+							logger.Error(err.Error())
+							return
+						}
 						skip = true
 						break
 					}
@@ -570,7 +598,11 @@ func migratePullRequests(ctx context.Context, errs chan<- error, githubPath, git
 				// Create a worktree
 				worktree, err := repo.Worktree()
 				if err != nil {
-					errs <- fmt.Errorf("creating worktree: %v", err)
+					err = fmt.Errorf("creating worktree: %v", err)
+					if !sendErr(err) {
+						logger.Error(err.Error())
+						return
+					}
 					continue
 				}
 
@@ -581,7 +613,11 @@ func migratePullRequests(ctx context.Context, errs chan<- error, githubPath, git
 				logger.Trace("retrieving commits for merge request", "name", gitlabPath[1], "group", gitlabPath[0], "project_id", project.ID, "merge_request_id", mergeRequest.IID)
 				mergeRequestCommits, _, err := gl.MergeRequests.GetMergeRequestCommits(project.ID, mergeRequest.IID, &gitlab.GetMergeRequestCommitsOptions{OrderBy: "created_at", Sort: "asc"})
 				if err != nil {
-					errs <- fmt.Errorf("retrieving merge request commits: %v", err)
+					err = fmt.Errorf("retrieving merge request commits: %v", err)
+					if !sendErr(err) {
+						logger.Error(err.Error())
+						return
+					}
 					continue
 				}
 
@@ -596,24 +632,40 @@ func migratePullRequests(ctx context.Context, errs chan<- error, githubPath, git
 				})
 
 				if mergeRequestCommits[0] == nil {
-					errs <- fmt.Errorf("start commit for merge request %d is nil", mergeRequest.IID)
+					err = fmt.Errorf("start commit for merge request %d is nil", mergeRequest.IID)
+					if !sendErr(err) {
+						logger.Error(err.Error())
+						return
+					}
 					continue
 				}
 				if mergeRequestCommits[len(mergeRequestCommits)-1] == nil {
-					errs <- fmt.Errorf("end commit for merge request %d is nil", mergeRequest.IID)
+					err = fmt.Errorf("end commit for merge request %d is nil", mergeRequest.IID)
+					if !sendErr(err) {
+						logger.Error(err.Error())
+						return
+					}
 					continue
 				}
 
 				logger.Trace("inspecting start commit", "name", gitlabPath[1], "group", gitlabPath[0], "project_id", project.ID, "merge_request_id", mergeRequest.IID, "sha", mergeRequestCommits[0].ShortID)
 				startCommit, err := object.GetCommit(repo.Storer, plumbing.NewHash(mergeRequestCommits[0].ID))
 				if err != nil {
-					errs <- fmt.Errorf("loading start commit: %v", err)
+					err = fmt.Errorf("loading start commit: %v", err)
+					if !sendErr(err) {
+						logger.Error(err.Error())
+						return
+					}
 					continue
 				}
 
 				// Starting with a merge commit is _probably_ wrong
 				if startCommit.NumParents() > 1 {
-					errs <- fmt.Errorf("start commit %s for merge request %d has %d parents", mergeRequestCommits[0].ShortID, mergeRequest.IID, startCommit.NumParents())
+					err = fmt.Errorf("start commit %s for merge request %d has %d parents", mergeRequestCommits[0].ShortID, mergeRequest.IID, startCommit.NumParents())
+					if !sendErr(err) {
+						logger.Error(err.Error())
+						return
+					}
 					continue
 				}
 
@@ -629,7 +681,11 @@ func migratePullRequests(ctx context.Context, errs chan<- error, githubPath, git
 					logger.Trace("inspecting start commit parent", "name", gitlabPath[1], "group", gitlabPath[0], "project_id", project.ID, "merge_request_id", mergeRequest.IID, "sha", mergeRequestCommits[0].ShortID)
 					startCommitParent, err := startCommit.Parent(0)
 					if err != nil {
-						errs <- fmt.Errorf("loading parent commit: %s", err)
+						err = fmt.Errorf("loading parent commit: %s", err)
+						if !sendErr(err) {
+							logger.Error(err.Error())
+							return
+						}
 						continue
 					}
 
@@ -640,7 +696,11 @@ func migratePullRequests(ctx context.Context, errs chan<- error, githubPath, git
 						Branch: plumbing.NewBranchReferenceName(mergeRequest.TargetBranch),
 						Hash:   startCommitParent.Hash,
 					}); err != nil {
-						errs <- fmt.Errorf("checking out temporary target branch: %v", err)
+						err = fmt.Errorf("checking out temporary target branch: %v", err)
+						if !sendErr(err) {
+							logger.Error(err.Error())
+							return
+						}
 						continue
 					}
 				}
@@ -653,7 +713,11 @@ func migratePullRequests(ctx context.Context, errs chan<- error, githubPath, git
 					Branch: plumbing.NewBranchReferenceName(mergeRequest.SourceBranch),
 					Hash:   endHash,
 				}); err != nil {
-					errs <- fmt.Errorf("checking out temporary source branch: %v", err)
+					err = fmt.Errorf("checking out temporary source branch: %v", err)
+					if !sendErr(err) {
+						logger.Error(err.Error())
+						return
+					}
 					continue
 				}
 
@@ -670,7 +734,11 @@ func migratePullRequests(ctx context.Context, errs chan<- error, githubPath, git
 					if errors.As(err, &upToDateError) {
 						logger.Trace("branch already exists and is up-to-date on GitHub", "owner", githubPath[0], "repo", githubPath[1], "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch)
 					} else {
-						errs <- fmt.Errorf("pushing temporary branches to github: %v", err)
+						err = fmt.Errorf("pushing temporary branches to github: %v", err)
+						if !sendErr(err) {
+							logger.Error(err.Error())
+							return
+						}
 						continue
 					}
 				}
@@ -689,7 +757,11 @@ func migratePullRequests(ctx context.Context, errs chan<- error, githubPath, git
 
 		author, err := getGitlabUser(mergeRequest.Author.Username)
 		if err != nil {
-			errs <- fmt.Errorf("retrieving gitlab user: %v", err)
+			err = fmt.Errorf("retrieving gitlab user: %v", err)
+			if !sendErr(err) {
+				logger.Error(err.Error())
+				return
+			}
 			continue
 		}
 		if author.WebsiteURL != "" {
@@ -705,7 +777,11 @@ func migratePullRequests(ctx context.Context, errs chan<- error, githubPath, git
 		approvers := make([]string, 0)
 		awards, _, err := gl.AwardEmoji.ListMergeRequestAwardEmoji(project.ID, mergeRequest.IID, &gitlab.ListAwardEmojiOptions{PerPage: 100})
 		if err != nil {
-			errs <- fmt.Errorf("listing merge request awards: %v", err)
+			err = fmt.Errorf("listing merge request awards: %v", err)
+			if !sendErr(err) {
+				logger.Error(err.Error())
+				return
+			}
 		} else {
 			for _, award := range awards {
 				if award.Name == "thumbsup" {
@@ -713,7 +789,11 @@ func migratePullRequests(ctx context.Context, errs chan<- error, githubPath, git
 
 					approverUser, err := getGitlabUser(award.User.Username)
 					if err != nil {
-						errs <- fmt.Errorf("retrieving gitlab user: %v", err)
+						err = fmt.Errorf("retrieving gitlab user: %v", err)
+						if !sendErr(err) {
+							logger.Error(err.Error())
+							return
+						}
 						continue
 					}
 					if approverUser.WebsiteURL != "" {
@@ -771,7 +851,11 @@ func migratePullRequests(ctx context.Context, errs chan<- error, githubPath, git
 				Draft:               &mergeRequest.Draft,
 			}
 			if pullRequest, _, err = gh.PullRequests.Create(ctx, githubPath[0], githubPath[1], &newPullRequest); err != nil {
-				errs <- fmt.Errorf("creating pull request: %v", err)
+				err = fmt.Errorf("creating pull request: %v", err)
+				if !sendErr(err) {
+					logger.Error(err.Error())
+					return
+				}
 				continue
 			}
 
@@ -780,7 +864,11 @@ func migratePullRequests(ctx context.Context, errs chan<- error, githubPath, git
 
 				pullRequest.State = pointer("closed")
 				if pullRequest, _, err = gh.PullRequests.Edit(ctx, githubPath[0], githubPath[1], pullRequest.GetNumber(), pullRequest); err != nil {
-					errs <- fmt.Errorf("updating pull request: %v", err)
+					err = fmt.Errorf("updating pull request: %v", err)
+					if !sendErr(err) {
+						logger.Error(err.Error())
+						return
+					}
 					continue
 				}
 			}
@@ -804,7 +892,11 @@ func migratePullRequests(ctx context.Context, errs chan<- error, githubPath, git
 				pullRequest.Draft = &mergeRequest.Draft
 				pullRequest.State = newState
 				if pullRequest, _, err = gh.PullRequests.Edit(ctx, githubPath[0], githubPath[1], pullRequest.GetNumber(), pullRequest); err != nil {
-					errs <- fmt.Errorf("updating pull request: %v", err)
+					err = fmt.Errorf("updating pull request: %v", err)
+					if !sendErr(err) {
+						logger.Error(err.Error())
+						return
+					}
 					continue
 				}
 			} else {
@@ -826,7 +918,11 @@ func migratePullRequests(ctx context.Context, errs chan<- error, githubPath, git
 				if errors.As(err, &upToDateError) {
 					logger.Trace("branches already deleted on GitHub", "owner", githubPath[0], "repo", githubPath[1], "pr_number", pullRequest.GetNumber(), "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch)
 				} else {
-					errs <- fmt.Errorf("pushing branch deletions to github: %v", err)
+					err = fmt.Errorf("pushing branch deletions to github: %v", err)
+					if !sendErr(err) {
+						logger.Error(err.Error())
+						return
+					}
 					continue
 				}
 			}
@@ -843,7 +939,11 @@ func migratePullRequests(ctx context.Context, errs chan<- error, githubPath, git
 		for {
 			result, resp, err := gl.Notes.ListMergeRequestNotes(project.ID, mergeRequest.IID, opts)
 			if err != nil {
-				errs <- fmt.Errorf("listing merge request notes: %v", err)
+				err = fmt.Errorf("listing merge request notes: %v", err)
+				if !sendErr(err) {
+					logger.Error(err.Error())
+					return
+				}
 				skipComments = true
 				break
 			}
@@ -861,7 +961,11 @@ func migratePullRequests(ctx context.Context, errs chan<- error, githubPath, git
 			logger.Debug("retrieving GitHub pull request comments", "owner", githubPath[0], "repo", githubPath[1], "pr_number", pullRequest.GetNumber())
 			prComments, _, err := gh.Issues.ListComments(ctx, githubPath[0], githubPath[1], pullRequest.GetNumber(), &github.IssueListCommentsOptions{Sort: pointer("created"), Direction: pointer("asc")})
 			if err != nil {
-				errs <- fmt.Errorf("listing pull request comments: %v", err)
+				err = fmt.Errorf("listing pull request comments: %v", err)
+				if !sendErr(err) {
+					logger.Error(err.Error())
+					return
+				}
 			} else {
 				for _, comment := range comments {
 					if comment == nil || comment.System {
@@ -872,7 +976,11 @@ func migratePullRequests(ctx context.Context, errs chan<- error, githubPath, git
 
 					commentAuthor, err := getGitlabUser(comment.Author.Username)
 					if err != nil {
-						errs <- fmt.Errorf("retrieving gitlab user: %v", err)
+						err = fmt.Errorf("retrieving gitlab user: %v", err)
+						if !sendErr(err) {
+							logger.Error(err.Error())
+							return
+						}
 						break
 					}
 					if commentAuthor.WebsiteURL != "" {
@@ -907,7 +1015,11 @@ func migratePullRequests(ctx context.Context, errs chan<- error, githubPath, git
 								logger.Debug("updating pull request comment", "owner", githubPath[0], "repo", githubPath[1], "pr_number", pullRequest.GetNumber(), "comment_id", prComment.GetID())
 								prComment.Body = &commentBody
 								if _, _, err = gh.Issues.EditComment(ctx, githubPath[0], githubPath[1], prComment.GetID(), prComment); err != nil {
-									errs <- fmt.Errorf("updating pull request comments: %v", err)
+									err = fmt.Errorf("updating pull request comments: %v", err)
+									if !sendErr(err) {
+										logger.Error(err.Error())
+										return
+									}
 									break
 								}
 							}
@@ -922,7 +1034,11 @@ func migratePullRequests(ctx context.Context, errs chan<- error, githubPath, git
 							Body: &commentBody,
 						}
 						if _, _, err = gh.Issues.CreateComment(ctx, githubPath[0], githubPath[1], pullRequest.GetNumber(), &newComment); err != nil {
-							errs <- fmt.Errorf("creating pull request comments: %v", err)
+							err = fmt.Errorf("creating pull request comments: %v", err)
+							if !sendErr(err) {
+								logger.Error(err.Error())
+								return
+							}
 							break
 						}
 					}
