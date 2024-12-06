@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -815,6 +816,7 @@ func migratePullRequests(ctx context.Context, errs chan<- error, githubPath, git
 			description = "_No description_"
 		}
 
+		slices.Sort(approvers)
 		approval := strings.Join(approvers, ", ")
 		if approval == "" {
 			approval = "_No approvers_"
