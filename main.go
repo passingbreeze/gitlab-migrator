@@ -153,7 +153,8 @@ func main() {
 					// If x-ratelimit-reset is present, this indicates the UTC timestamp when we can retry
 					if w, ok := resp.Header["X-Ratelimit-Reset"]; ok {
 						if recoveryEpoch, err := strconv.ParseInt(w[0], 10, 64); err == nil {
-							return time.Until(time.Unix(recoveryEpoch, 0))
+							// Add 30 seconds to recovery timestamp for clock differences
+							return time.Until(time.Unix(recoveryEpoch+30, 0))
 						}
 					}
 
