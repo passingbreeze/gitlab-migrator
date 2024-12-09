@@ -130,9 +130,9 @@ func main() {
 	retryClient := &retryablehttp.Client{
 		HTTPClient:   cleanhttp.DefaultPooledClient(),
 		Logger:       nil,
-		RetryMax:     32,
+		RetryMax:     16,
 		RetryWaitMin: 30 * time.Second,
-		RetryWaitMax: 120 * time.Second,
+		RetryWaitMax: 300 * time.Second,
 	}
 
 	retryClient.Backoff = func(min, max time.Duration, attemptNum int, resp *http.Response) (sleep time.Duration) {
