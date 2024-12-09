@@ -912,7 +912,6 @@ func migratePullRequests(ctx context.Context, githubPath, gitlabPath []string, p
 			result, resp, err := gl.Notes.ListMergeRequestNotes(project.ID, mergeRequest.IID, opts)
 			if err != nil {
 				sendErr(fmt.Errorf("listing merge request notes: %v", err))
-				failureCount++
 				skipComments = true
 				break
 			}
@@ -926,7 +925,9 @@ func migratePullRequests(ctx context.Context, githubPath, gitlabPath []string, p
 			opts.Page = resp.NextPage
 		}
 
-		if !skipComments {
+		if skipComments {
+			failureCount++
+		} else {
 			logger.Debug("retrieving GitHub pull request comments", "owner", githubPath[0], "repo", githubPath[1], "pr_number", pullRequest.GetNumber())
 			prComments, _, err := gh.Issues.ListComments(ctx, githubPath[0], githubPath[1], pullRequest.GetNumber(), &github.IssueListCommentsOptions{Sort: pointer("created"), Direction: pointer("asc")})
 			if err != nil {
@@ -1000,9 +1001,9 @@ func migratePullRequests(ctx context.Context, githubPath, gitlabPath []string, p
 					}
 				}
 			}
-		}
 
-		successCount++
+			successCount++
+		}
 	}
 
 	skippedCount := totalCount - successCount - failureCount
