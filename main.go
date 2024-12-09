@@ -508,7 +508,9 @@ func migratePullRequests(ctx context.Context, githubPath, gitlabPath []string, p
 		opts.Page = resp.NextPage
 	}
 
-	logger.Info("migrating merge requests from GitLab to GitHub", "name", gitlabPath[1], "group", gitlabPath[0])
+	var successCount, failureCount int
+	totalCount := len(mergeRequests)
+	logger.Info("migrating merge requests from GitLab to GitHub", "name", gitlabPath[1], "group", gitlabPath[0], "count", totalCount)
 	for _, mergeRequest := range mergeRequests {
 		if mergeRequest == nil {
 			continue
@@ -585,6 +587,7 @@ func migratePullRequests(ctx context.Context, githubPath, gitlabPath []string, p
 				worktree, err := repo.Worktree()
 				if err != nil {
 					sendErr(fmt.Errorf("creating worktree: %v", err))
+					failureCount++
 					continue
 				}
 
@@ -596,6 +599,7 @@ func migratePullRequests(ctx context.Context, githubPath, gitlabPath []string, p
 				mergeRequestCommits, _, err := gl.MergeRequests.GetMergeRequestCommits(project.ID, mergeRequest.IID, &gitlab.GetMergeRequestCommitsOptions{OrderBy: "created_at", Sort: "asc"})
 				if err != nil {
 					sendErr(fmt.Errorf("retrieving merge request commits: %v", err))
+					failureCount++
 					continue
 				}
 
@@ -611,10 +615,12 @@ func migratePullRequests(ctx context.Context, githubPath, gitlabPath []string, p
 
 				if mergeRequestCommits[0] == nil {
 					sendErr(fmt.Errorf("start commit for merge request %d is nil", mergeRequest.IID))
+					failureCount++
 					continue
 				}
 				if mergeRequestCommits[len(mergeRequestCommits)-1] == nil {
 					sendErr(fmt.Errorf("end commit for merge request %d is nil", mergeRequest.IID))
+					failureCount++
 					continue
 				}
 
@@ -622,12 +628,14 @@ func migratePullRequests(ctx context.Context, githubPath, gitlabPath []string, p
 				startCommit, err := object.GetCommit(repo.Storer, plumbing.NewHash(mergeRequestCommits[0].ID))
 				if err != nil {
 					sendErr(fmt.Errorf("loading start commit: %v", err))
+					failureCount++
 					continue
 				}
 
 				// Starting with a merge commit is _probably_ wrong
 				if startCommit.NumParents() > 1 {
 					sendErr(fmt.Errorf("start commit %s for merge request %d has %d parents", mergeRequestCommits[0].ShortID, mergeRequest.IID, startCommit.NumParents()))
+					failureCount++
 					continue
 				}
 
@@ -644,6 +652,7 @@ func migratePullRequests(ctx context.Context, githubPath, gitlabPath []string, p
 					startCommitParent, err := startCommit.Parent(0)
 					if err != nil {
 						sendErr(fmt.Errorf("loading parent commit: %s", err))
+						failureCount++
 						continue
 					}
 
@@ -655,6 +664,7 @@ func migratePullRequests(ctx context.Context, githubPath, gitlabPath []string, p
 						Hash:   startCommitParent.Hash,
 					}); err != nil {
 						sendErr(fmt.Errorf("checking out temporary target branch: %v", err))
+						failureCount++
 						continue
 					}
 				}
@@ -668,6 +678,7 @@ func migratePullRequests(ctx context.Context, githubPath, gitlabPath []string, p
 					Hash:   endHash,
 				}); err != nil {
 					sendErr(fmt.Errorf("checking out temporary source branch: %v", err))
+					failureCount++
 					continue
 				}
 
@@ -685,6 +696,7 @@ func migratePullRequests(ctx context.Context, githubPath, gitlabPath []string, p
 						logger.Trace("branch already exists and is up-to-date on GitHub", "owner", githubPath[0], "repo", githubPath[1], "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch)
 					} else {
 						sendErr(fmt.Errorf("pushing temporary branches to github: %v", err))
+						failureCount++
 						continue
 					}
 				}
@@ -704,6 +716,7 @@ func migratePullRequests(ctx context.Context, githubPath, gitlabPath []string, p
 		author, err := getGitlabUser(mergeRequest.Author.Username)
 		if err != nil {
 			sendErr(fmt.Errorf("retrieving gitlab user: %v", err))
+			failureCount++
 			continue
 		}
 		if author.WebsiteURL != "" {
@@ -793,6 +806,7 @@ func migratePullRequests(ctx context.Context, githubPath, gitlabPath []string, p
 			}
 			if pullRequest, _, err = gh.PullRequests.Create(ctx, githubPath[0], githubPath[1], &newPullRequest); err != nil {
 				sendErr(fmt.Errorf("creating pull request: %v", err))
+				failureCount++
 				continue
 			}
 
@@ -802,6 +816,7 @@ func migratePullRequests(ctx context.Context, githubPath, gitlabPath []string, p
 				pullRequest.State = pointer("closed")
 				if pullRequest, _, err = gh.PullRequests.Edit(ctx, githubPath[0], githubPath[1], pullRequest.GetNumber(), pullRequest); err != nil {
 					sendErr(fmt.Errorf("updating pull request: %v", err))
+					failureCount++
 					continue
 				}
 			}
@@ -827,6 +842,7 @@ func migratePullRequests(ctx context.Context, githubPath, gitlabPath []string, p
 				pullRequest.State = newState
 				if pullRequest, _, err = gh.PullRequests.Edit(ctx, githubPath[0], githubPath[1], pullRequest.GetNumber(), pullRequest); err != nil {
 					sendErr(fmt.Errorf("updating pull request: %v", err))
+					failureCount++
 					continue
 				}
 			} else {
@@ -849,6 +865,7 @@ func migratePullRequests(ctx context.Context, githubPath, gitlabPath []string, p
 					logger.Trace("branches already deleted on GitHub", "owner", githubPath[0], "repo", githubPath[1], "pr_number", pullRequest.GetNumber(), "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch)
 				} else {
 					sendErr(fmt.Errorf("pushing branch deletions to github: %v", err))
+					failureCount++
 					continue
 				}
 			}
@@ -866,6 +883,7 @@ func migratePullRequests(ctx context.Context, githubPath, gitlabPath []string, p
 			result, resp, err := gl.Notes.ListMergeRequestNotes(project.ID, mergeRequest.IID, opts)
 			if err != nil {
 				sendErr(fmt.Errorf("listing merge request notes: %v", err))
+				failureCount++
 				skipComments = true
 				break
 			}
@@ -895,6 +913,7 @@ func migratePullRequests(ctx context.Context, githubPath, gitlabPath []string, p
 					commentAuthor, err := getGitlabUser(comment.Author.Username)
 					if err != nil {
 						sendErr(fmt.Errorf("retrieving gitlab user: %v", err))
+						failureCount++
 						break
 					}
 					if commentAuthor.WebsiteURL != "" {
@@ -930,6 +949,7 @@ func migratePullRequests(ctx context.Context, githubPath, gitlabPath []string, p
 								prComment.Body = &commentBody
 								if _, _, err = gh.Issues.EditComment(ctx, githubPath[0], githubPath[1], prComment.GetID(), prComment); err != nil {
 									sendErr(fmt.Errorf("updating pull request comments: %v", err))
+									failureCount++
 									break
 								}
 							}
@@ -944,12 +964,19 @@ func migratePullRequests(ctx context.Context, githubPath, gitlabPath []string, p
 							Body: &commentBody,
 						}
 						if _, _, err = gh.Issues.CreateComment(ctx, githubPath[0], githubPath[1], pullRequest.GetNumber(), &newComment); err != nil {
-							sendErr(fmt.Errorf("creating pull request comments: %v", err))
+							sendErr(fmt.Errorf("creating pull request comment: %v", err))
+							failureCount++
 							break
 						}
 					}
 				}
 			}
 		}
+
+		successCount++
 	}
+
+	skippedCount := totalCount - successCount - failureCount
+
+	logger.Info("migrated merge requests from GitLab to GitHub", "name", gitlabPath[1], "group", gitlabPath[0], "successful", successCount, "failed", failureCount, "skipped", skippedCount)
 }
