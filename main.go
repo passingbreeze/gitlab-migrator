@@ -135,12 +135,27 @@ func main() {
 		RetryWaitMax: 120 * time.Second,
 	}
 
-	retryClient.Backoff = func(min, max time.Duration, attemptNum int, resp *http.Response) time.Duration {
+	retryClient.Backoff = func(min, max time.Duration, attemptNum int, resp *http.Response) (sleep time.Duration) {
+		requestMethod := "unknown"
+		requestUrl := "unknown"
+
+		if req := resp.Request; req != nil {
+			requestMethod = req.Method
+			if req.URL != nil {
+				requestUrl = req.URL.String()
+			}
+		}
+
+		defer func() {
+			logger.Trace("waiting before retrying failed API request", "method", requestMethod, "url", requestUrl, "status", resp.StatusCode, "sleep", sleep)
+		}()
+
 		if resp != nil {
 			// Check the Retry-After header
 			if s, ok := resp.Header["Retry-After"]; ok {
-				if sleep, err := strconv.ParseInt(s[0], 10, 64); err == nil {
-					return time.Second * time.Duration(sleep)
+				if retryAfter, err := strconv.ParseInt(s[0], 10, 64); err == nil {
+					sleep = time.Second * time.Duration(retryAfter)
+					return
 				}
 			}
 
@@ -154,24 +169,27 @@ func main() {
 					if w, ok := resp.Header["X-Ratelimit-Reset"]; ok {
 						if recoveryEpoch, err := strconv.ParseInt(w[0], 10, 64); err == nil {
 							// Add 30 seconds to recovery timestamp for clock differences
-							return time.Until(time.Unix(recoveryEpoch+30, 0))
+							sleep = time.Until(time.Unix(recoveryEpoch+30, 0))
+							return
 						}
 					}
 
 					// Otherwise, wait for 60 seconds
-					return 60 * time.Second
+					sleep = 60 * time.Second
+					return
 				}
 			}
 		}
 
 		// Exponential backoff
 		mult := math.Pow(2, float64(attemptNum)) * float64(min)
-		sleep := time.Duration(mult)
-		if float64(sleep) != mult || sleep > max {
-			sleep = max
+		wait := time.Duration(mult)
+		if float64(wait) != mult || wait > max {
+			wait = max
 		}
 
-		return sleep
+		sleep = wait
+		return
 	}
 
 	retryClient.CheckRetry = func(ctx context.Context, resp *http.Response, err error) (bool, error) {
@@ -196,8 +214,19 @@ func main() {
 			http.StatusGatewayTimeout,
 		}
 
+		requestMethod := "unknown"
+		requestUrl := "unknown"
+
+		if req := resp.Request; req != nil {
+			requestMethod = req.Method
+			if req.URL != nil {
+				requestUrl = req.URL.String()
+			}
+		}
+
 		for _, status := range retryableStatuses {
 			if resp.StatusCode == status {
+				logger.Trace("retrying failed API request", "method", requestMethod, "url", requestUrl, "status", resp.StatusCode)
 				return true, nil
 			}
 		}
