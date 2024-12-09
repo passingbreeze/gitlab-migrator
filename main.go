@@ -40,7 +40,8 @@ const (
 	defaultGitlabDomain = "gitlab.com"
 )
 
-var loop, deleteExistingRepos, enablePullRequests, renameMasterToMain bool
+var loop, report bool
+var deleteExistingRepos, enablePullRequests, renameMasterToMain bool
 var githubDomain, githubRepo, githubToken, githubUser, gitlabDomain, gitlabProject, gitlabToken, projectsCsvPath string
 
 var (
@@ -53,6 +54,12 @@ var (
 )
 
 type Project = []string
+
+type Report struct {
+	GroupName          string
+	ProjectName        string
+	MergeRequestsCount int
+}
 
 func sendErr(err error) {
 	errCount++
@@ -98,6 +105,8 @@ func main() {
 	}
 
 	flag.BoolVar(&loop, "loop", false, "continue migrating until canceled")
+	flag.BoolVar(&report, "report", false, "report on primitives to be migrated instead of beginning migration")
+
 	flag.BoolVar(&deleteExistingRepos, "delete-existing-repos", false, "whether existing repositories should be deleted before migrating")
 	flag.BoolVar(&enablePullRequests, "migrate-pull-requests", false, "whether pull requests should be migrated")
 	flag.BoolVar(&renameMasterToMain, "rename-master-to-main", false, "rename master branch to main and update pull requests")
@@ -276,15 +285,110 @@ func main() {
 		projects = []Project{{gitlabProject, githubRepo}}
 	}
 
-	if errCount, err := performMigration(ctx, projects); err != nil {
-		sendErr(err)
-		os.Exit(1)
-	} else if errCount > 0 {
-		logger.Warn(fmt.Sprintf("encountered %d errors during migration, review log output for details", errCount))
+	if report {
+		printReport(ctx, projects)
+	} else {
+		if err = performMigration(ctx, projects); err != nil {
+			sendErr(err)
+			os.Exit(1)
+		} else if errCount > 0 {
+			logger.Warn(fmt.Sprintf("encountered %d errors during migration, review log output for details", errCount))
+		}
 	}
 }
 
-func performMigration(ctx context.Context, projects []Project) (int, error) {
+func printReport(ctx context.Context, projects []Project) {
+	logger.Debug("building report")
+
+	results := make([]Report, 0)
+
+	for _, proj := range projects {
+		if err := ctx.Err(); err != nil {
+			return
+		}
+
+		result, err := reportProject(ctx, proj)
+		if err != nil {
+			errCount++
+			sendErr(err)
+		}
+
+		if result != nil {
+			results = append(results, *result)
+		}
+	}
+
+	fmt.Println()
+
+	totalMergeRequests := 0
+	for _, result := range results {
+		totalMergeRequests += result.MergeRequestsCount
+		fmt.Printf("%#v\n", result)
+	}
+
+	fmt.Println()
+	fmt.Printf("Total merge requests: %d\n", totalMergeRequests)
+	fmt.Println()
+}
+
+func reportProject(ctx context.Context, proj []string) (*Report, error) {
+	gitlabPath := strings.Split(proj[0], "/")
+	//githubPath := strings.Split(proj[1], "/")
+
+	logger.Debug("searching for GitLab project", "name", gitlabPath[1], "group", gitlabPath[0])
+	searchTerm := gitlabPath[1]
+	projectResult, _, err := gl.Projects.ListProjects(&gitlab.ListProjectsOptions{Search: &searchTerm})
+	if err != nil {
+		return nil, fmt.Errorf("listing projects: %v", err)
+	}
+
+	var project *gitlab.Project
+	for _, item := range projectResult {
+		if item == nil {
+			continue
+		}
+
+		if item.PathWithNamespace == proj[0] {
+			logger.Debug("found GitLab project", "name", gitlabPath[1], "group", gitlabPath[0], "project_id", item.ID)
+			project = item
+		}
+	}
+
+	if project == nil {
+		return nil, fmt.Errorf("no matching GitLab project found: %s", proj[0])
+	}
+
+	var mergeRequests []*gitlab.MergeRequest
+
+	opts := &gitlab.ListProjectMergeRequestsOptions{
+		OrderBy: pointer("created_at"),
+		Sort:    pointer("asc"),
+	}
+
+	logger.Debug("retrieving GitLab merge requests", "name", gitlabPath[1], "group", gitlabPath[0], "project_id", project.ID)
+	for {
+		result, resp, err := gl.MergeRequests.ListProjectMergeRequests(project.ID, opts)
+		if err != nil {
+			return nil, fmt.Errorf("retrieving gitlab merge requests: %v", err)
+		}
+
+		mergeRequests = append(mergeRequests, result...)
+
+		if resp.NextPage == 0 {
+			break
+		}
+
+		opts.Page = resp.NextPage
+	}
+
+	return &Report{
+		GroupName:          gitlabPath[0],
+		ProjectName:        gitlabPath[1],
+		MergeRequestsCount: len(mergeRequests),
+	}, nil
+}
+
+func performMigration(ctx context.Context, projects []Project) error {
 	concurrency := maxConcurrency
 	if len(projects) < maxConcurrency {
 		concurrency = len(projects)
@@ -327,6 +431,10 @@ func performMigration(ctx context.Context, projects []Project) (int, error) {
 	if loop {
 		logger.Info(fmt.Sprintf("looping migration until canceled"))
 		for {
+			if err := ctx.Err(); err != nil {
+				break
+			}
+
 			queueProjects()
 		}
 	} else {
@@ -336,7 +444,7 @@ func performMigration(ctx context.Context, projects []Project) (int, error) {
 
 	wg.Wait()
 
-	return errCount, nil
+	return nil
 }
 
 func migrateProject(ctx context.Context, proj []string) error {
