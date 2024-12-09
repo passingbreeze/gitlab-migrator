@@ -169,7 +169,7 @@ func main() {
 					if w, ok := resp.Header["X-Ratelimit-Reset"]; ok {
 						if recoveryEpoch, err := strconv.ParseInt(w[0], 10, 64); err == nil {
 							// Add 30 seconds to recovery timestamp for clock differences
-							sleep = time.Until(time.Unix(recoveryEpoch+30, 0))
+							sleep = roundDuration(time.Until(time.Unix(recoveryEpoch+30, 0)), time.Second)
 							return
 						}
 					}
