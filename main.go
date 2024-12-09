@@ -40,7 +40,7 @@ const (
 	defaultGitlabDomain = "gitlab.com"
 )
 
-var deleteExistingRepos, enablePullRequests, renameMasterToMain bool
+var loop, deleteExistingRepos, enablePullRequests, renameMasterToMain bool
 var githubDomain, githubRepo, githubToken, githubUser, gitlabDomain, gitlabProject, gitlabToken, projectsCsvPath string
 
 var (
@@ -97,9 +97,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	flag.BoolVar(&deleteExistingRepos, "delete-existing-repos", false, "whether existing repositories should be deleted before migrating (defaults to: false)")
-	flag.BoolVar(&enablePullRequests, "migrate-pull-requests", false, "whether pull requests should be migrated (defaults to: false)")
-	flag.BoolVar(&renameMasterToMain, "rename-master-to-main", false, "rename master branch to main and update pull requests (defaults to: false)")
+	flag.BoolVar(&loop, "loop", false, "continue migrating until canceled")
+	flag.BoolVar(&deleteExistingRepos, "delete-existing-repos", false, "whether existing repositories should be deleted before migrating")
+	flag.BoolVar(&enablePullRequests, "migrate-pull-requests", false, "whether pull requests should be migrated")
+	flag.BoolVar(&renameMasterToMain, "rename-master-to-main", false, "rename master branch to main and update pull requests")
 
 	flag.StringVar(&githubDomain, "github-domain", defaultGithubDomain, "specifies the GitHub domain to use")
 	flag.StringVar(&githubRepo, "github-repo", "", "the GitHub repository to migrate to")
@@ -313,15 +314,26 @@ func performMigration(ctx context.Context, projects []Project) (int, error) {
 		}()
 	}
 
-	for _, proj := range projects {
-		if err := ctx.Err(); err != nil {
-			break
-		}
+	queueProjects := func() {
+		for _, proj := range projects {
+			if err := ctx.Err(); err != nil {
+				break
+			}
 
-		queue <- proj
+			queue <- proj
+		}
 	}
 
-	close(queue)
+	if loop {
+		logger.Info(fmt.Sprintf("looping migration until canceled"))
+		for {
+			queueProjects()
+		}
+	} else {
+		queueProjects()
+		close(queue)
+	}
+
 	wg.Wait()
 
 	return errCount, nil

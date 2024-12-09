@@ -30,7 +30,7 @@ Written in Go, this is a cross-platform CLI utility that accepts the following r
 
 ```
   -delete-existing-repos
-        whether existing repositories should be deleted before migrating (defaults to: false)
+        whether existing repositories should be deleted before migrating
   -github-domain string
         specifies the GitHub domain to use (default "github.com")
   -github-repo string
@@ -41,14 +41,16 @@ Written in Go, this is a cross-platform CLI utility that accepts the following r
         specifies the GitLab domain to use (default "gitlab.com")
   -gitlab-project string
         the GitLab project to migrate
+  -loop
+        continue migrating until canceled
   -max-concurrency int
         how many projects to migrate in parallel (default 4)
   -migrate-pull-requests
-        whether pull requests should be migrated (defaults to: false)
+        whether pull requests should be migrated
   -projects-csv string
         specifies the path to a CSV file describing projects to migrate (incompatible with -gitlab-project and -github-repo)
   -rename-master-to-main
-        rename master branch to main and update pull requests (defaults to: false)
+        rename master branch to main and update pull requests
 ```
 
 Use the `-github-user` argument to specify the GitHub username for whom the authentication token was issued (mandatory).
@@ -74,6 +76,8 @@ Specify the location of a self-hosted instance of GitLab with the `-gitlab-domai
 As a bonus, this tool can transparently rename the `master` branch on your GitLab repository, to `main` on the migrated GitHub repository - enable with the `-rename-master-to-main` argument.
 
 By default, 4 workers will be spawned to migrate up to 4 projects in parallel. You can increase or decrease this with the `-max-concurrency` argument. Note that due to GitHub API rate-limiting, you may not experience any significant speed-up. See [GitHub API docs](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api) for details.
+
+Specify `-loop` to continue migrating projects until canceled. This is useful for daemonizing the migration tool, or automatically restarting when migrating a large number of projects (or a small number of very large projects).
 
 ## Logging
 
