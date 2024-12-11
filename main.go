@@ -944,7 +944,7 @@ func migratePullRequests(ctx context.Context, githubPath, gitlabPath []string, p
 %[3]s`, githubAuthorName, mergeRequest.IID, description, gitlabPath[0], gitlabPath[1], mergeRequest.CreatedAt.Format(dateFormat), closeDate, approval, originalState, gitlabDomain, mergeRequestTitle)
 
 		if pullRequest == nil {
-			logger.Debug("creating pull request", "owner", githubPath[0], "repo", githubPath[1], "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch)
+			logger.Info("creating pull request", "owner", githubPath[0], "repo", githubPath[1], "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch)
 			newPullRequest := github.NewPullRequest{
 				Title:               &mergeRequest.Title,
 				Head:                &mergeRequest.SourceBranch,
@@ -983,7 +983,7 @@ func migratePullRequests(ctx context.Context, githubPath, gitlabPath []string, p
 				(pullRequest.Title == nil || *pullRequest.Title != mergeRequest.Title) ||
 				(pullRequest.Body == nil || *pullRequest.Body != body) ||
 				(pullRequest.Draft == nil || *pullRequest.Draft != mergeRequest.Draft) {
-				logger.Debug("updating pull request", "owner", githubPath[0], "repo", githubPath[1], "pr_number", pullRequest.GetNumber())
+				logger.Info("updating pull request", "owner", githubPath[0], "repo", githubPath[1], "pr_number", pullRequest.GetNumber())
 
 				pullRequest.Title = &mergeRequest.Title
 				pullRequest.Body = &body
@@ -1053,6 +1053,8 @@ func migratePullRequests(ctx context.Context, githubPath, gitlabPath []string, p
 			if err != nil {
 				sendErr(fmt.Errorf("listing pull request comments: %v", err))
 			} else {
+				logger.Info("migrating merge request comments from GitLab to GitHub", "owner", githubPath[0], "repo", githubPath[1], githubPath[0], "pr_number", pullRequest.GetNumber(), "count", len(comments))
+
 				for _, comment := range comments {
 					if comment == nil || comment.System {
 						continue
