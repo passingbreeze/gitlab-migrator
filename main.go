@@ -1053,7 +1053,7 @@ func migratePullRequests(ctx context.Context, githubPath, gitlabPath []string, p
 			if err != nil {
 				sendErr(fmt.Errorf("listing pull request comments: %v", err))
 			} else {
-				logger.Info("migrating merge request comments from GitLab to GitHub", "owner", githubPath[0], "repo", githubPath[1], githubPath[0], "pr_number", pullRequest.GetNumber(), "count", len(comments))
+				logger.Info("migrating merge request comments from GitLab to GitHub", "owner", githubPath[0], "repo", githubPath[1], "pr_number", pullRequest.GetNumber(), "count", len(comments))
 
 				for _, comment := range comments {
 					if comment == nil || comment.System {
