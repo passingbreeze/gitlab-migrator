@@ -27,7 +27,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/go-git/go-git/v5/storage/memory"
 	"github.com/gofri/go-github-pagination/githubpagination"
-	"github.com/google/go-github/v66/github"
+	"github.com/google/go-github/v67/github"
 	"github.com/hashicorp/go-cleanhttp"
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/go-retryablehttp"
@@ -69,7 +69,11 @@ func sendErr(err error) {
 func main() {
 	var err error
 
-	ctx, cancel := context.WithCancel(context.Background())
+	// Bypass pre-emptive rate limit checks in the GitHub client, as we will handle these via go-retryablehttp
+	valueCtx := context.WithValue(context.Background(), github.BypassRateLimitCheck, true)
+
+	// Assign a Done channel so we can abort on Ctrl-c
+	ctx, cancel := context.WithCancel(valueCtx)
 
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt)
