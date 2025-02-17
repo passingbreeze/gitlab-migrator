@@ -36,7 +36,7 @@ Written in Go, this is a cross-platform CLI utility that accepts the following r
   -github-repo string
         the GitHub repository to migrate to
   -github-user string
-        specifies the GitHub user to use, who will author any migrated PRs (required)
+        specifies the GitHub user to use, who will author any migrated PRs. can also be sourced from GITHUB_USER environment variable (required)
   -gitlab-domain string
         specifies the GitLab domain to use (default "gitlab.com")
   -gitlab-project string
@@ -53,7 +53,7 @@ Written in Go, this is a cross-platform CLI utility that accepts the following r
         rename master branch to main and update pull requests
 ```
 
-Use the `-github-user` argument to specify the GitHub username for whom the authentication token was issued (mandatory).
+Use the `-github-user` argument to specify the GitHub username for whom the authentication token was issued (mandatory). You can also specify this with the `GITHUB_USER` environment variable.
 
 You can specify an individual GitLab project with the `-gitlab-project` argument, along with the target GitHub repository with the `-github-repo` argument.
 

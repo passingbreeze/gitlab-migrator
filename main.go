@@ -127,6 +127,10 @@ func main() {
 	flag.Parse()
 
 	if githubUser == "" {
+		githubUser = os.Getenv("GITHUB_USER")
+	}
+
+	if githubUser == "" {
 		logger.Error("must specify GitHub user")
 		os.Exit(1)
 	}
