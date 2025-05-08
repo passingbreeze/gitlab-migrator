@@ -1,5 +1,8 @@
 name: Build and Release
 
+permissions:
+  contents: write
+
 on:
   push:
     tags:
@@ -47,7 +50,8 @@ jobs:
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
-          files: ./dist/*
+          files: "dist/*/gitlab-migrator-*"
+          fail_on_unmatched_files: true
 
 
 # vim: set ts=2 sts=2 sw=2 et:
