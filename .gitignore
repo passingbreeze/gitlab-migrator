@@ -1,3 +1,8 @@
 dist/
 gitlab-migrator
 *.csv
+.mise*
+vscode/
+vscode/*
+.idea/
+.idea/*

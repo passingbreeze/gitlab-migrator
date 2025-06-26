@@ -1,32 +1,94 @@
 # GitLab to GitHub Repository Migration Tool
 
-This tool can migrate projects from GitLab to repositories on GitHub. It currently supports:
+A comprehensive command-line tool for migrating projects from GitLab to GitHub repositories. This tool provides enterprise-grade migration capabilities with the following features:
 
-* migrating the git repository with full history
-* migrating merge requests and translating them into pull requests, including closed/merged ones
-* renaming the `master` branch to `main` along the way
+## Features
 
-It does not support migrating issues, wikis or any other primitive at this time. PRs welcome!
+* **Complete Repository Migration**: Migrate git repositories with full commit history, branches, and tags
+* **Pull Request Migration**: Convert GitLab merge requests to GitHub pull requests, including:
+  - Open, closed, and merged requests
+  - Comments and discussions
+  - Original author attribution
+  - Approval tracking via thumbs-up reactions
+* **Branch Management**: Automatic `master` to `main` branch renaming
+* **Secure Authentication**: Token-based authentication with no credential exposure
+* **Concurrent Processing**: Parallel migration of multiple projects with configurable concurrency
+* **Idempotent Operations**: Safe to run multiple times - updates existing repositories and pull requests
+* **Enterprise Support**: Works with GitLab self-hosted and GitHub Enterprise instances
 
-Both gitlab.com and GitLab self-hosted are supported, as well as github.com and GitHub Enterprise.
+**Not Currently Supported**: Issues, wikis, project settings, or other GitLab-specific features. Contributions welcome!
+
+## Requirements
+
+- Go 1.23 or later
+- Valid GitLab and GitHub API tokens
+- Network access to both GitLab and GitHub instances
 
 ## Installing
 
-```
+```bash
 go install github.com/manicminer/gitlab-migrator
 ```
 
-Golang 1.23 was used, you may have luck with earlier releases.
+Or build from source:
+
+```bash
+git clone https://github.com/manicminer/gitlab-migrator.git
+cd gitlab-migrator
+go build -o gitlab-migrator
+```
+
+## Authentication Setup
+
+Before using the tool, set up your authentication tokens:
+
+```bash
+export GITHUB_TOKEN="your_github_personal_access_token"
+export GITLAB_TOKEN="your_gitlab_personal_access_token"
+export GITHUB_USER="your_github_username"  # Optional, can use -github-user flag
+```
+
+**Required Token Permissions:**
+- **GitHub**: `repo`, `delete_repo` (if using -delete-existing-repos)
+- **GitLab**: `api`, `read_repository`
 
 ## Usage
 
-_Example Usage_
+### Basic Migration
 
-```
-gitlab-migrator -github-user=mytokenuser -gitlab-project=mygitlabuser/myproject -github-repo=mygithubuser/myrepo -migrate-pull-requests
+```bash
+# Migrate a single project
+gitlab-migrator \
+  -github-user=mytokenuser \
+  -gitlab-project=mygitlabuser/myproject \
+  -github-repo=mygithubuser/myrepo \
+  -migrate-pull-requests
+
+# Migrate with master->main branch rename
+gitlab-migrator \
+  -github-user=mytokenuser \
+  -gitlab-project=mygitlabuser/myproject \
+  -github-repo=mygithubuser/myrepo \
+  -migrate-pull-requests \
+  -rename-master-to-main
 ```
 
-Written in Go, this is a cross-platform CLI utility that accepts the following runtime arguments:
+### Bulk Migration
+
+```bash
+# Create a CSV file with project mappings
+echo "gitlab-group/project1,github-org/repo1" > projects.csv
+echo "gitlab-group/project2,github-org/repo2" >> projects.csv
+
+# Migrate multiple projects
+gitlab-migrator \
+  -github-user=mytokenuser \
+  -projects-csv=projects.csv \
+  -migrate-pull-requests \
+  -max-concurrency=2
+```
+
+## Command Line Options
 
 ```
   -delete-existing-repos
@@ -79,9 +141,56 @@ By default, 4 workers will be spawned to migrate up to 4 projects in parallel. Y
 
 Specify `-loop` to continue migrating projects until canceled. This is useful for daemonizing the migration tool, or automatically restarting when migrating a large number of projects (or a small number of very large projects).
 
+## Advanced Usage
+
+### Enterprise Instances
+
+```bash
+# Self-hosted GitLab and GitHub Enterprise
+gitlab-migrator \
+  -github-user=mytokenuser \
+  -gitlab-domain=gitlab.mycompany.com \
+  -github-domain=github.mycompany.com \
+  -gitlab-project=mygroup/myproject \
+  -github-repo=myorg/myrepo \
+  -migrate-pull-requests
+```
+
+### Continuous Migration
+
+```bash
+# Run continuously for ongoing synchronization
+gitlab-migrator \
+  -github-user=mytokenuser \
+  -projects-csv=projects.csv \
+  -migrate-pull-requests \
+  -loop
+```
+
+### Reporting Mode
+
+```bash
+# Get a report without migrating
+gitlab-migrator \
+  -github-user=mytokenuser \
+  -projects-csv=projects.csv \
+  -report
+```
+
 ## Logging
 
-This tool is entirely noninteractive and outputs different levels of logs depending on your interest. You can set the `LOG_LEVEL` environment to one of `ERROR`, `WARN`, `INFO`, `DEBUG` or `TRACE` to get more or less verbosity. The default is `INFO`.
+This tool is entirely non-interactive and provides structured logging output. Configure logging verbosity with the `LOG_LEVEL` environment variable:
+
+```bash
+export LOG_LEVEL=DEBUG  # Options: ERROR, WARN, INFO, DEBUG, TRACE (default: INFO)
+```
+
+**Log Levels:**
+- `ERROR`: Critical errors only
+- `WARN`: Warnings and errors  
+- `INFO`: General progress information (default)
+- `DEBUG`: Detailed operation information
+- `TRACE`: Very verbose debugging output
 
 ## Caching
 
@@ -118,6 +227,69 @@ _Example migrated pull request (closed)_
 
 ![example migrated closed pull request](pr-example-closed.jpeg)
 
+## Architecture
+
+This tool is built with a modern, service-oriented architecture:
+
+- **Service Layer**: Centralized migration services with dependency injection
+- **Modular Design**: Separate modules for project migration, pull request handling, and authentication
+- **Secure Authentication**: No credential exposure in URLs or logs
+- **Thread-Safe Caching**: In-memory caching with concurrent access protection
+- **Error Handling**: Comprehensive error tracking and reporting
+- **Rate Limiting**: Built-in GitHub API rate limit handling with exponential backoff
+
+## Troubleshooting
+
+### Common Issues
+
+**Authentication Errors**
+```bash
+# Verify tokens are set correctly
+echo $GITHUB_TOKEN | wc -c  # Should be ~40+ characters
+echo $GITLAB_TOKEN | wc -c  # Should be ~40+ characters
+
+# Test token access
+curl -H "Authorization: token $GITHUB_TOKEN" https://api.github.com/user
+curl -H "Authorization: Bearer $GITLAB_TOKEN" https://gitlab.com/api/v4/user
+```
+
+**Rate Limiting**
+- GitHub has API rate limits (5,000 requests/hour for authenticated users)
+- The tool includes automatic retry with exponential backoff
+- Use `-max-concurrency=1` for large migrations to reduce rate limit issues
+
+**Memory Usage**
+- Large repositories may consume significant memory
+- The tool uses in-memory Git operations for safety
+- Consider migrating large projects individually
+
+**Network Issues**
+- Ensure network access to both GitLab and GitHub instances
+- For enterprise instances, verify SSL certificates and proxy settings
+
+### Getting Help
+
+1. Enable debug logging: `export LOG_LEVEL=DEBUG`
+2. Check the logs for specific error messages
+3. Verify your token permissions and expiration dates
+4. For enterprise instances, confirm domain accessibility
+
 ## Contributing, reporting bugs etc...
 
 Please use GitHub issues & pull requests. This project is licensed under the MIT license.
+
+### Development
+
+```bash
+# Clone and build
+git clone https://github.com/manicminer/gitlab-migrator.git
+cd gitlab-migrator
+go mod download
+go build -o gitlab-migrator
+
+# Run tests
+go test ./...
+
+# Format code
+go fmt ./...
+```
