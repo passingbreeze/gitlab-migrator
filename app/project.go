@@ -1,11 +1,10 @@
-package main
+package app
 
 import (
 	"context"
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
 	"strings"
 
 	"github.com/go-git/go-billy/v5/memfs"
@@ -14,23 +13,31 @@ import (
 	"github.com/go-git/go-git/v5/storage/memory"
 	"github.com/google/go-github/v69/github"
 	"github.com/xanzy/go-gitlab"
+
+	"gitlab-migrator/common" // Import common
 )
 
-// ProjectMigrator handles the migration of individual projects
+// Constants from the common package
+const (
+	MasterBranchName = common.MasterBranchName
+	MainBranchName   = common.MainBranchName
+)
+
+// ProjectMigrator handles the migration of individual projects.
 type ProjectMigrator struct {
 	service *MigrationService
 }
 
+// NewProjectMigrator creates a new project migrator with the provided service.
 func NewProjectMigrator(service *MigrationService) *ProjectMigrator {
 	return &ProjectMigrator{service: service}
 }
 
-// MigrateProject migrates a single project from GitLab to GitHub
+// MigrateProject migrates a single project from GitLab to GitHub.
 func (pm *ProjectMigrator) MigrateProject(ctx context.Context, proj []string) error {
-	gitlabPathFull := proj[0] // Full path (e.g., db/tour/oracle/tour-oracle-tourprod)
+	gitlabPathFull := proj[0]
 	githubPath := strings.Split(proj[1], "/")
 
-	// Add GitLab domain information to logs
 	pm.service.logger.Info("starting project migration",
 		"gitlabPath", gitlabPathFull,
 		"githubPath", proj[1],
@@ -39,9 +46,6 @@ func (pm *ProjectMigrator) MigrateProject(ctx context.Context, proj []string) er
 	// Project name is the last part of the path
 	pathParts := strings.Split(gitlabPathFull, "/")
 	projectName := pathParts[len(pathParts)-1]
-
-	// gitlabPath variable - result of splitting the full path by slashes
-	gitlabPath := pathParts
 
 	pm.service.logger.Info("searching for GitLab project",
 		"projectName", projectName,
@@ -54,8 +58,7 @@ func (pm *ProjectMigrator) MigrateProject(ctx context.Context, proj []string) er
 	}
 
 	pm.service.logger.Info("mirroring repository from GitLab to GitHub",
-		"name", projectName,
-		"path", gitlabPathFull,
+		"project", project.PathWithNamespace,
 		"github_org", githubPath[0],
 		"github_repo", githubPath[1],
 		"gitlabDomain", pm.service.config.GitlabDomain)
@@ -65,13 +68,11 @@ func (pm *ProjectMigrator) MigrateProject(ctx context.Context, proj []string) er
 		return err
 	}
 
-	// Handle repository creation/deletion
-	if err := pm.handleGithubRepository(ctx, githubPath, project, gitlabPath); err != nil {
+	if err := pm.handleGithubRepository(ctx, githubPath, project); err != nil {
 		return err
 	}
 
-	// Clone and push repository
-	repo, err := pm.cloneAndPushRepository(ctx, project, githubPath, gitlabPath)
+	repo, err := pm.cloneAndPushRepository(ctx, project, githubPath)
 	if err != nil {
 		return err
 	}
@@ -79,7 +80,8 @@ func (pm *ProjectMigrator) MigrateProject(ctx context.Context, proj []string) er
 	// Migrate pull requests if enabled
 	if pm.service.config.EnablePullRequests {
 		prMigrator := NewPullRequestMigrator(pm.service)
-		prMigrator.MigratePullRequests(ctx, githubPath, gitlabPath, project, repo)
+		// FIXED: Removed the extra `gitlabPath` argument to match the function signature.
+		prMigrator.MigratePullRequests(ctx, githubPath, project, repo)
 	}
 
 	return nil
@@ -98,11 +100,9 @@ func (pm *ProjectMigrator) findGitlabProject(gitlabPathFull, projectName string)
 			continue
 		}
 
-		// Check if path_with_namespace matches exactly
 		if item.PathWithNamespace == gitlabPathFull {
 			pm.service.logger.Debug("found GitLab project",
-				"name", projectName,
-				"path_with_namespace", item.PathWithNamespace,
+				"project", item.PathWithNamespace,
 				"project_id", item.ID,
 				"gitlabDomain", pm.service.config.GitlabDomain)
 			project = item
@@ -123,7 +123,7 @@ func (pm *ProjectMigrator) validateGithubOwner(ctx context.Context, owner string
 		return fmt.Errorf("retrieving github user: %v", err)
 	}
 
-	if !strings.EqualFold(*user.Type, "organization") && 
+	if !strings.EqualFold(*user.Type, "organization") &&
 		(!strings.EqualFold(*user.Type, "user") || !strings.EqualFold(*user.Login, owner)) {
 		return fmt.Errorf("configured owner is neither an organization nor the current user: %s", owner)
 	}
@@ -131,13 +131,12 @@ func (pm *ProjectMigrator) validateGithubOwner(ctx context.Context, owner string
 	return nil
 }
 
-func (pm *ProjectMigrator) handleGithubRepository(ctx context.Context, githubPath []string, project *gitlab.Project, gitlabPath []string) error {
+func (pm *ProjectMigrator) handleGithubRepository(ctx context.Context, githubPath []string, project *gitlab.Project) error {
 	pm.service.logger.Debug("checking for existing repository on GitHub",
 		"owner", githubPath[0],
 		"repo", githubPath[1],
 		"gitlabDomain", pm.service.config.GitlabDomain)
 
-	// Check if repository exists
 	_, _, err := pm.service.githubClient.Repositories.Get(ctx, githubPath[0], githubPath[1])
 
 	var githubError *github.ErrorResponse
@@ -166,7 +165,7 @@ func (pm *ProjectMigrator) handleGithubRepository(ctx context.Context, githubPat
 		defaultBranch = project.DefaultBranch
 	}
 
-	homepage := buildURL(pm.service.config.GitlabDomain, fmt.Sprintf("%s/%s", gitlabPath[0], gitlabPath[1]), "")
+	homepage := common.BuildURL(pm.service.config.GitlabDomain, project.PathWithNamespace, "") // Use common.BuildURL
 
 	if createRepo {
 		if err := pm.createGithubRepository(ctx, githubPath, project, defaultBranch, homepage, repoDeleted); err != nil {
@@ -191,14 +190,14 @@ func (pm *ProjectMigrator) createGithubRepository(ctx context.Context, githubPat
 	}
 
 	newRepo := github.Repository{
-		Name:          pointer(githubPath[1]),
+		Name:          common.Pointer(githubPath[1]), // Use common.Pointer
 		Description:   &project.Description,
 		Homepage:      &homepage,
 		DefaultBranch: &defaultBranch,
-		Private:       pointer(true),
-		HasIssues:     pointer(true),
-		HasProjects:   pointer(true),
-		HasWiki:       pointer(true),
+		Private:       common.Pointer(true), // Use common.Pointer
+		HasIssues:     common.Pointer(true), // Use common.Pointer
+		HasProjects:   common.Pointer(true), // Use common.Pointer
+		HasWiki:       common.Pointer(true), // Use common.Pointer
 	}
 
 	if _, _, err := pm.service.githubClient.Repositories.Create(ctx, org, &newRepo); err != nil {
@@ -210,16 +209,16 @@ func (pm *ProjectMigrator) createGithubRepository(ctx context.Context, githubPat
 
 func (pm *ProjectMigrator) updateRepositorySettings(ctx context.Context, githubPath []string, project *gitlab.Project, homepage string) error {
 	pm.service.logger.Debug("updating repository settings", "owner", githubPath[0], "repo", githubPath[1])
-	
+
 	updateRepo := github.Repository{
-		Name:              pointer(githubPath[1]),
+		Name:              common.Pointer(githubPath[1]), // Use common.Pointer
 		Description:       &project.Description,
 		Homepage:          &homepage,
-		AllowAutoMerge:    pointer(true),
-		AllowMergeCommit:  pointer(true),
-		AllowRebaseMerge:  pointer(true),
-		AllowSquashMerge:  pointer(true),
-		AllowUpdateBranch: pointer(true),
+		AllowAutoMerge:    common.Pointer(true), // Use common.Pointer
+		AllowMergeCommit:  common.Pointer(true), // Use common.Pointer
+		AllowRebaseMerge:  common.Pointer(true), // Use common.Pointer
+		AllowSquashMerge:  common.Pointer(true), // Use common.Pointer
+		AllowUpdateBranch: common.Pointer(true), // Use common.Pointer
 	}
 
 	if _, _, err := pm.service.githubClient.Repositories.Edit(ctx, githubPath[0], githubPath[1], &updateRepo); err != nil {
@@ -229,16 +228,16 @@ func (pm *ProjectMigrator) updateRepositorySettings(ctx context.Context, githubP
 	return nil
 }
 
-func (pm *ProjectMigrator) cloneAndPushRepository(ctx context.Context, project *gitlab.Project, githubPath, gitlabPath []string) (*git.Repository, error) {
+// cloneAndPushRepository clones the GitLab repository and pushes it to GitHub.
+func (pm *ProjectMigrator) cloneAndPushRepository(ctx context.Context, project *gitlab.Project, githubPath []string) (*git.Repository, error) {
 	cloneUrlWithCredentials, err := pm.service.authManager.GetSafeCloneURL(project.HTTPURLToRepo)
 	if err != nil {
 		return nil, fmt.Errorf("preparing clone URL: %v", err)
 	}
 
-	// In-memory filesystem for worktree operations
 	fs := memfs.New()
 
-	pm.service.logger.Debug("cloning repository", "name", gitlabPath[1], "group", gitlabPath[0], "url", project.HTTPURLToRepo)
+	pm.service.logger.Debug("cloning repository", "path", project.PathWithNamespace, "url", project.HTTPURLToRepo)
 	repo, err := git.CloneContext(ctx, memory.NewStorage(), fs, &git.CloneOptions{
 		URL:        cloneUrlWithCredentials,
 		Auth:       pm.service.authManager.GetGitlabAuth(),
@@ -250,31 +249,29 @@ func (pm *ProjectMigrator) cloneAndPushRepository(ctx context.Context, project *
 	}
 
 	if pm.service.config.RenameMasterToMain {
-		if err := pm.renameMasterBranch(repo, gitlabPath); err != nil {
+		if err := pm.renameMasterBranch(repo, project); err != nil {
 			return nil, err
 		}
 	}
 
-	githubUrl := buildURL(pm.service.config.GithubDomain, fmt.Sprintf("%s/%s", githubPath[0], githubPath[1]), "")
+	githubUrl := common.BuildURL(pm.service.config.GithubDomain, fmt.Sprintf("%s/%s", githubPath[0], githubPath[1]), "") // Use common.BuildURL
 
-	pm.service.logger.Debug("adding remote for GitHub repository", "name", gitlabPath[1], "group", gitlabPath[0], "url", githubUrl)
+	pm.service.logger.Debug("adding remote for GitHub repository", "project", project.PathWithNamespace, "url", githubUrl)
 	if err = pm.service.authManager.AddGithubRemote(repo, "github", githubPath[0], githubPath[1], pm.service.config.GithubDomain); err != nil {
 		return nil, fmt.Errorf("adding github remote: %v", err)
 	}
 
-	pm.service.logger.Debug("force-pushing to GitHub repository", "name", gitlabPath[1], "group", gitlabPath[0], "url", githubUrl)
+	pm.service.logger.Debug("force-pushing to GitHub repository", "project", project.PathWithNamespace, "url", githubUrl)
 	if err = pm.service.authManager.PushToGithub(ctx, repo, "github", &git.PushOptions{
 		Force: true,
 	}); err != nil {
-		upToDateError := errors.New("already up-to-date")
-		if errors.As(err, &upToDateError) {
-			pm.service.logger.Debug("repository already up-to-date on GitHub", "name", gitlabPath[1], "group", gitlabPath[0], "url", githubUrl)
+		if err.Error() == "already up-to-date" {
+			pm.service.logger.Debug("repository already up-to-date on GitHub", "project", project.PathWithNamespace, "url", githubUrl)
 		} else {
 			return nil, fmt.Errorf("pushing to github repo: %v", err)
 		}
 	}
 
-	// Set default branch
 	defaultBranch := MainBranchName
 	if !pm.service.config.RenameMasterToMain && project.DefaultBranch != "" {
 		defaultBranch = project.DefaultBranch
@@ -291,17 +288,18 @@ func (pm *ProjectMigrator) cloneAndPushRepository(ctx context.Context, project *
 	return repo, nil
 }
 
-func (pm *ProjectMigrator) renameMasterBranch(repo *git.Repository, gitlabPath []string) error {
+// renameMasterBranch renames the master branch to main if it exists.
+func (pm *ProjectMigrator) renameMasterBranch(repo *git.Repository, project *gitlab.Project) error {
 	if masterBranch, err := repo.Reference(plumbing.NewBranchReferenceName(MasterBranchName), false); err == nil {
-		pm.service.logger.Info("renaming master branch to main prior to push", "name", gitlabPath[1], "group", gitlabPath[0], "sha", masterBranch.Hash())
+		pm.service.logger.Info("renaming master branch to main prior to push", "project", project.PathWithNamespace, "sha", masterBranch.Hash())
 
-		pm.service.logger.Debug("creating main branch", "name", gitlabPath[1], "group", gitlabPath[0], "sha", masterBranch.Hash())
+		pm.service.logger.Debug("creating main branch", "project", project.PathWithNamespace, "sha", masterBranch.Hash())
 		mainBranch := plumbing.NewHashReference(plumbing.NewBranchReferenceName(MainBranchName), masterBranch.Hash())
 		if err = repo.Storer.SetReference(mainBranch); err != nil {
 			return fmt.Errorf("creating main branch: %v", err)
 		}
 
-		pm.service.logger.Debug("deleting master branch", "name", gitlabPath[1], "group", gitlabPath[0], "sha", masterBranch.Hash())
+		pm.service.logger.Debug("deleting master branch", "project", project.PathWithNamespace, "sha", masterBranch.Hash())
 		if err = repo.Storer.RemoveReference(masterBranch.Name()); err != nil {
 			return fmt.Errorf("deleting master branch: %v", err)
 		}

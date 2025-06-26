@@ -1,49 +1,32 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"encoding/csv"
-	"flag"
-	"fmt"
-	"math"
-	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
-	"strings"
-	"sync"
-	"time"
 
-	"github.com/gofri/go-github-pagination/githubpagination"
-	"github.com/google/go-github/v69/github"
-	"github.com/hashicorp/go-cleanhttp"
 	"github.com/hashicorp/go-hclog"
-	"github.com/hashicorp/go-retryablehttp"
-	"github.com/xanzy/go-gitlab"
+
+	"gitlab-migrator/app"
+	"gitlab-migrator/client"
+	"gitlab-migrator/config"
 )
 
-type Project = []string
-
-type Report struct {
-	GroupName          string
-	ProjectName        string
-	MergeRequestsCount int
-}
-
+// main is the entry point for the GitLab to GitHub migration tool.
 func main() {
-	var err error
-	var loop, report bool
-	var deleteExistingRepos, enablePullRequests, renameMasterToMain bool
-	var githubDomain, githubRepo, githubToken, githubUser, gitlabDomain, gitlabProject, gitlabToken, projectsCsvPath string
-	var maxConcurrency int
+	logger := hclog.New(&hclog.LoggerOptions{
+		Name:  "gitlab-migrator",
+		Level: hclog.LevelFromString(os.Getenv("LOG_LEVEL")),
+	})
 
-	// Bypass pre-emptive rate limit checks in the GitHub client, as we will handle these via go-retryablehttp
-	valueCtx := context.WithValue(context.Background(), github.BypassRateLimitCheck, true)
+	cfg, err := config.ParseFlags()
+	if err != nil {
+		logger.Error("Configuration error", "error", err)
+		os.Exit(1)
+	}
 
-	// Assign a Done channel so we can abort on Ctrl-c
-	ctx, cancel := context.WithCancel(valueCtx)
-
+	// Set up context for cancellation via Ctrl-C
+	ctx, cancel := context.WithCancel(context.Background())
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt)
 	defer func() {
@@ -53,392 +36,26 @@ func main() {
 	go func() {
 		select {
 		case <-c:
+			logger.Info("Shutdown signal received, canceling operations...")
 			cancel()
 		case <-ctx.Done():
 		}
 	}()
 
-	logger := hclog.New(&hclog.LoggerOptions{
-		Name:  "gitlab-migrator",
-		Level: hclog.LevelFromString(os.Getenv("LOG_LEVEL")),
-	})
+	// Set up GitHub context with rate limit bypass
+	ctx = client.SetupGitHubContext(ctx)
 
-	githubToken = os.Getenv("GITHUB_TOKEN")
-	if githubToken == "" {
-		logger.Error("missing environment variable", "name", "GITHUB_TOKEN")
-		os.Exit(1)
-	}
-
-	gitlabToken = os.Getenv("GITLAB_TOKEN")
-	if gitlabToken == "" {
-		logger.Error("missing environment variable", "name", "GITLAB_TOKEN")
-		os.Exit(1)
-	}
-
-	flag.BoolVar(&loop, "loop", false, "continue migrating until canceled")
-	flag.BoolVar(&report, "report", false, "report on primitives to be migrated instead of beginning migration")
-
-	flag.BoolVar(&deleteExistingRepos, "delete-existing-repos", false, "whether existing repositories should be deleted before migrating")
-	flag.BoolVar(&enablePullRequests, "migrate-pull-requests", false, "whether pull requests should be migrated")
-	flag.BoolVar(&renameMasterToMain, "rename-master-to-main", false, "rename master branch to main and update pull requests")
-
-	flag.StringVar(&githubDomain, "github-domain", DefaultGithubDomain, "specifies the GitHub domain to use")
-	flag.StringVar(&githubRepo, "github-repo", "", "the GitHub repository to migrate to")
-	flag.StringVar(&githubUser, "github-user", "", "specifies the GitHub user to use, who will author any migrated PRs (required)")
-	flag.StringVar(&gitlabDomain, "gitlab-domain", DefaultGitlabDomain, "specifies the GitLab domain to use")
-	flag.StringVar(&gitlabProject, "gitlab-project", "", "the GitLab project to migrate")
-	flag.StringVar(&projectsCsvPath, "projects-csv", "", "specifies the path to a CSV file describing projects to migrate (incompatible with -gitlab-project and -github-repo)")
-
-	flag.IntVar(&maxConcurrency, "max-concurrency", DefaultConcurrency, "how many projects to migrate in parallel")
-
-	flag.Parse()
-
-	if githubUser == "" {
-		githubUser = os.Getenv("GITHUB_USER")
-	}
-
-	if githubUser == "" {
-		logger.Error("must specify GitHub user")
-		os.Exit(1)
-	}
-
-	repoSpecifiedInline := githubRepo != "" && gitlabProject != ""
-	if repoSpecifiedInline && projectsCsvPath != "" {
-		logger.Error("cannot specify -projects-csv and either -github-repo or -gitlab-project at the same time")
-		os.Exit(1)
-	}
-	if !repoSpecifiedInline && projectsCsvPath == "" {
-		logger.Error("must specify either -projects-csv or both of -github-repo and -gitlab-project")
-		os.Exit(1)
-	}
-
-	retryClient := &retryablehttp.Client{
-		HTTPClient:   cleanhttp.DefaultPooledClient(),
-		Logger:       nil,
-		RetryMax:     DefaultRetryMax,
-		RetryWaitMin: DefaultRetryWaitMin,
-		RetryWaitMax: DefaultRetryWaitMax,
-	}
-
-	retryClient.Backoff = func(min, max time.Duration, attemptNum int, resp *http.Response) (sleep time.Duration) {
-		requestMethod := "unknown"
-		requestUrl := "unknown"
-
-		if req := resp.Request; req != nil {
-			requestMethod = req.Method
-			if req.URL != nil {
-				requestUrl = req.URL.String()
-			}
-		}
-
-		defer func() {
-			logger.Trace("waiting before retrying failed API request", "method", requestMethod, "url", requestUrl, "status", resp.StatusCode, "sleep", sleep, "attempt", attemptNum, "max_attempts", retryClient.RetryMax)
-		}()
-
-		if resp != nil {
-			// Check the Retry-After header
-			if s, ok := resp.Header["Retry-After"]; ok {
-				if retryAfter, err := strconv.ParseInt(s[0], 10, 64); err == nil {
-					sleep = time.Second * time.Duration(retryAfter)
-					return
-				}
-			}
-
-			// Reference:
-			// - https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api?apiVersion=2022-11-28
-			// - https://docs.github.com/en/rest/using-the-rest-api/best-practices-for-using-the-rest-api?apiVersion=2022-11-28
-			if v, ok := resp.Header["X-Ratelimit-Remaining"]; ok {
-				if remaining, err := strconv.ParseInt(v[0], 10, 64); err == nil && remaining == 0 {
-
-					// If x-ratelimit-reset is present, this indicates the UTC timestamp when we can retry
-					if w, ok := resp.Header["X-Ratelimit-Reset"]; ok {
-						if recoveryEpoch, err := strconv.ParseInt(w[0], 10, 64); err == nil {
-							// Add buffer to recovery timestamp for clock differences
-							sleep = roundDuration(time.Until(time.Unix(recoveryEpoch+int64(DefaultClockSkewBuffer.Seconds()), 0)), time.Second)
-							return
-						}
-					}
-
-					// Otherwise, wait for default rate limit period
-					sleep = DefaultRateLimitWait
-					return
-				}
-			}
-		}
-
-		// Exponential backoff
-		mult := math.Pow(2, float64(attemptNum)) * float64(min)
-		wait := time.Duration(mult)
-		if float64(wait) != mult || wait > max {
-			wait = max
-		}
-
-		sleep = wait
-		return
-	}
-
-	retryClient.CheckRetry = func(ctx context.Context, resp *http.Response, err error) (bool, error) {
-		if err != nil {
-			return false, err
-		}
-
-		// Potential connection reset
-		if resp == nil {
-			return true, nil
-		}
-
-		retryableStatuses := []int{
-			http.StatusTooManyRequests, // rate-limiting
-			http.StatusForbidden,       // rate-limiting
-
-			http.StatusRequestTimeout,
-			http.StatusFailedDependency,
-			http.StatusInternalServerError,
-			http.StatusBadGateway,
-			http.StatusServiceUnavailable,
-			http.StatusGatewayTimeout,
-		}
-
-		requestMethod := "unknown"
-		requestUrl := "unknown"
-
-		if req := resp.Request; req != nil {
-			requestMethod = req.Method
-			if req.URL != nil {
-				requestUrl = req.URL.String()
-			}
-		}
-
-		for _, status := range retryableStatuses {
-			if resp.StatusCode == status {
-				logger.Trace("retrying failed API request", "method", requestMethod, "url", requestUrl, "status", resp.StatusCode)
-				return true, nil
-			}
-		}
-
-		return false, nil
-	}
-
-	client := githubpagination.NewClient(&retryablehttp.RoundTripper{Client: retryClient}, githubpagination.WithPerPage(DefaultPerPage))
-
-	var gh *github.Client
-	if githubDomain == DefaultGithubDomain {
-		gh = github.NewClient(client).WithAuthToken(githubToken)
-	} else {
-		// Determine protocol
-		githubUrl := buildURL(githubDomain, "", "")
-		if gh, err = github.NewClient(client).WithAuthToken(githubToken).WithEnterpriseURLs(githubUrl, githubUrl); err != nil {
-			logger.Error(err.Error())
-			os.Exit(1)
-		}
-	}
-
-	gitlabOpts := make([]gitlab.ClientOptionFunc, 0)
-	if gitlabDomain != DefaultGitlabDomain {
-		gitlabUrl := buildURL(gitlabDomain, "", "")
-		gitlabOpts = append(gitlabOpts, gitlab.WithBaseURL(gitlabUrl))
-	}
-
-	var gl *gitlab.Client
-	if gl, err = gitlab.NewClient(gitlabToken, gitlabOpts...); err != nil {
-		logger.Error(err.Error())
-		os.Exit(1)
-	}
-
-	// Create authentication manager
-	authManager := NewAuthManager(githubToken, gitlabToken, githubUser)
-
-	// Create migration configuration
-	config := &MigrationConfig{
-		GithubDomain:        githubDomain,
-		GitlabDomain:        gitlabDomain,
-		GithubUser:          githubUser,
-		MaxConcurrency:      maxConcurrency,
-		DeleteExistingRepos: deleteExistingRepos,
-		EnablePullRequests:  enablePullRequests,
-		RenameMasterToMain:  renameMasterToMain,
-		Loop:                loop,
-		Report:              report,
-	}
-
-	// Create migration service
-	migrationService := NewMigrationService(logger, gh, gl, authManager, config)
-
-	projects := make([]Project, 0)
-	if projectsCsvPath != "" {
-		data, err := os.ReadFile(projectsCsvPath)
-		if err != nil {
-			migrationService.SendError(err)
-			os.Exit(1)
-		}
-
-		// Trim a UTF-8 BOM, if present
-		data = bytes.TrimPrefix(data, []byte("\xef\xbb\xbf"))
-
-		if projects, err = csv.NewReader(bytes.NewBuffer(data)).ReadAll(); err != nil {
-			migrationService.SendError(err)
-			os.Exit(1)
-		}
-	} else {
-		projects = []Project{{gitlabProject, githubRepo}}
-	}
-
-	if report {
-		printReport(ctx, projects, migrationService)
-	} else {
-		if err = performMigration(ctx, projects, migrationService); err != nil {
-			migrationService.SendError(err)
-			os.Exit(1)
-		} else if migrationService.HasErrors() {
-			logger.Warn(fmt.Sprintf("encountered %d errors during migration, review log output for details", migrationService.GetErrorCount()))
-		}
-	}
-}
-
-func printReport(ctx context.Context, projects []Project, service *MigrationService) {
-	service.logger.Debug("building report")
-
-	results := make([]Report, 0)
-
-	for _, proj := range projects {
-		if err := ctx.Err(); err != nil {
-			return
-		}
-
-		result, err := reportProject(ctx, proj, service)
-		if err != nil {
-			service.SendError(err)
-		}
-
-		if result != nil {
-			results = append(results, *result)
-		}
-	}
-
-	fmt.Println()
-
-	totalMergeRequests := 0
-	for _, result := range results {
-		totalMergeRequests += result.MergeRequestsCount
-		fmt.Printf("%#v\n", result)
-	}
-
-	fmt.Println()
-	fmt.Printf("Total merge requests: %d\n", totalMergeRequests)
-	fmt.Println()
-}
-
-func reportProject(ctx context.Context, proj []string, service *MigrationService) (*Report, error) {
-	gitlabPath := strings.Split(proj[0], "/")
-
-	service.logger.Debug("searching for GitLab project", "name", gitlabPath[1], "group", gitlabPath[0])
-	searchTerm := gitlabPath[1]
-	projectResult, _, err := service.gitlabClient.Projects.ListProjects(&gitlab.ListProjectsOptions{Search: &searchTerm})
+	// Create and run the migration coordinator
+	coordinator, err := app.NewCoordinator(logger, cfg)
 	if err != nil {
-		return nil, fmt.Errorf("listing projects: %v", err)
+		logger.Error("Failed to create coordinator", "error", err)
+		os.Exit(1)
 	}
 
-	var project *gitlab.Project
-	for _, item := range projectResult {
-		if item == nil {
-			continue
-		}
-
-		if item.PathWithNamespace == proj[0] {
-			service.logger.Debug("found GitLab project", "name", gitlabPath[1], "group", gitlabPath[0], "project_id", item.ID)
-			project = item
-		}
+	if err := coordinator.Run(ctx); err != nil {
+		logger.Error("Application returned an error", "error", err)
+		os.Exit(1)
 	}
 
-	if project == nil {
-		return nil, fmt.Errorf("no matching GitLab project found: %s", proj[0])
-	}
-
-	var mergeRequests []*gitlab.MergeRequest
-
-	opts := &gitlab.ListProjectMergeRequestsOptions{
-		OrderBy: pointer("created_at"),
-		Sort:    pointer("asc"),
-	}
-
-	service.logger.Debug("retrieving GitLab merge requests", "name", gitlabPath[1], "group", gitlabPath[0], "project_id", project.ID)
-	for {
-		result, resp, err := service.gitlabClient.MergeRequests.ListProjectMergeRequests(project.ID, opts)
-		if err != nil {
-			return nil, fmt.Errorf("retrieving gitlab merge requests: %v", err)
-		}
-
-		mergeRequests = append(mergeRequests, result...)
-
-		if resp.NextPage == 0 {
-			break
-		}
-
-		opts.Page = resp.NextPage
-	}
-
-	return &Report{
-		GroupName:          gitlabPath[0],
-		ProjectName:        gitlabPath[1],
-		MergeRequestsCount: len(mergeRequests),
-	}, nil
-}
-
-func performMigration(ctx context.Context, projects []Project, service *MigrationService) error {
-	concurrency := service.config.MaxConcurrency
-	if len(projects) < service.config.MaxConcurrency {
-		concurrency = len(projects)
-	}
-
-	service.logger.Info(fmt.Sprintf("processing %d project(s) with %d workers", len(projects), concurrency))
-
-	var wg sync.WaitGroup
-	queue := make(chan Project, concurrency*QueueBufferMultiplier)
-
-	for i := 0; i < concurrency; i++ {
-		wg.Add(1)
-
-		go func() {
-			defer wg.Done()
-
-			for proj := range queue {
-				if err := ctx.Err(); err != nil {
-					break
-				}
-
-				projectMigrator := NewProjectMigrator(service)
-				if err := projectMigrator.MigrateProject(ctx, proj); err != nil {
-					service.SendError(err)
-				}
-			}
-		}()
-	}
-
-	queueProjects := func() {
-		for _, proj := range projects {
-			if err := ctx.Err(); err != nil {
-				break
-			}
-
-			queue <- proj
-		}
-	}
-
-	if service.config.Loop {
-		service.logger.Info(fmt.Sprintf("looping migration until canceled"))
-		for {
-			if err := ctx.Err(); err != nil {
-				break
-			}
-
-			queueProjects()
-		}
-	} else {
-		queueProjects()
-		close(queue)
-	}
-
-	wg.Wait()
-
-	return nil
+	logger.Info("Migration finished successfully.")
 }

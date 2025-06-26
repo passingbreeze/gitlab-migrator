@@ -1,61 +1,55 @@
-package main
+package app
 
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 
 	"github.com/google/go-github/v69/github"
 	"github.com/hashicorp/go-hclog"
 	"github.com/xanzy/go-gitlab"
+
+	"gitlab-migrator/config"
 )
 
 // MigrationService contains all dependencies needed for migration operations
 type MigrationService struct {
-	logger      hclog.Logger
-	cache       *objectCache
-	authManager *AuthManager
+	logger       hclog.Logger
+	cache        *objectCache
+	authManager  *AuthManager
 	githubClient *github.Client
 	gitlabClient *gitlab.Client
-	config      *MigrationConfig
+	config       *config.MigrationConfig
 	errorTracker *ErrorTracker
-}
-
-// MigrationConfig holds all configuration for the migration
-type MigrationConfig struct {
-	GithubDomain        string
-	GitlabDomain        string
-	GithubUser          string
-	MaxConcurrency      int
-	DeleteExistingRepos bool
-	EnablePullRequests  bool
-	RenameMasterToMain  bool
-	Loop                bool
-	Report              bool
 }
 
 // ErrorTracker handles error counting and reporting
 type ErrorTracker struct {
-	count  int
+	count  int32
 	logger hclog.Logger
 }
 
+// NewErrorTracker creates a new error tracker with the provided logger.
 func NewErrorTracker(logger hclog.Logger) *ErrorTracker {
 	return &ErrorTracker{
 		logger: logger,
 	}
 }
 
+// SendError records an error and logs it atomically.
 func (e *ErrorTracker) SendError(err error) {
-	e.count++
+	atomic.AddInt32(&e.count, 1)
 	e.logger.Error(err.Error())
 }
 
+// GetCount returns the current error count in a thread-safe manner.
 func (e *ErrorTracker) GetCount() int {
-	return e.count
+	return int(atomic.LoadInt32(&e.count))
 }
 
+// HasErrors returns true if any errors have been recorded.
 func (e *ErrorTracker) HasErrors() bool {
-	return e.count > 0
+	return atomic.LoadInt32(&e.count) > 0
 }
 
 // NewMigrationService creates a new migration service with all dependencies
@@ -64,7 +58,7 @@ func NewMigrationService(
 	githubClient *github.Client,
 	gitlabClient *gitlab.Client,
 	authManager *AuthManager,
-	config *MigrationConfig,
+	config *config.MigrationConfig,
 ) *MigrationService {
 	return &MigrationService{
 		logger:       logger,
